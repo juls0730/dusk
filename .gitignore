@@ -1,0 +1,11 @@
+/target
+/bin
+/ovmf
+
+# Bochs
+bx_enh_dbg.ini
+bochsout.txt
+
+# limine
+limine/
+
