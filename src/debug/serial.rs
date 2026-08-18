@@ -169,11 +169,11 @@ pub fn print(args: core::fmt::Arguments) {
 
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => ($crate::drivers::serial::print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::debug::serial::print(format_args!($($arg)*)));
 }
 
 #[macro_export]
 macro_rules! println {
-    () => ($crate::drivers::serial::print(format_args!("\n")));
-    ($($arg:tt)*) => ($crate::drivers::serial::print(format_args!("{}\n", format_args!($($arg)*))));
+    () => ($crate::debug::serial::print(format_args!("\n")));
+    ($($arg:tt)*) => ($crate::debug::serial::print(format_args!("{}\n", format_args!($($arg)*))));
 }
