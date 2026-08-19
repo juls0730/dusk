@@ -19,20 +19,8 @@ macro_rules! fatal_with_error_code {
     };
 }
 
-extern "x86-interrupt" fn debug_handler(frame: InterruptStackFrame) {
-    fatal_exception("DEBUG EXCEPTION", &frame, None);
-}
-
-extern "x86-interrupt" fn non_maskable_interrupt_handler(frame: InterruptStackFrame) {
-    fatal_exception("NON-MASKABLE INTERRUPT", &frame, None);
-}
-
 extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
     report_exception("BREAKPOINT", &frame, None);
-}
-
-extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    fatal_exception("DOUBLE FAULT", &frame, Some(error_code));
 }
 
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
@@ -43,12 +31,15 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
 }
 
 fatal_without_error_code!(divide_error_handler, "DIVIDE ERROR");
+fatal_without_error_code!(debug_handler, "DEBUG EXCEPTION");
+fatal_without_error_code!(non_maskable_interrupt_handler, "NON-MASKABLE INTERRUPT");
 fatal_without_error_code!(invalid_opcode_handler, "INVALID OPCODE");
 fatal_without_error_code!(device_not_available_handler, "DEVICE NOT AVAILABLE");
 fatal_without_error_code!(x87_floating_point_handler, "X87 FLOATING-POINT EXCEPTION");
 fatal_without_error_code!(machine_check_handler, "MACHINE CHECK");
 fatal_without_error_code!(simd_floating_point_handler, "SIMD FLOATING-POINT EXCEPTION");
 
+fatal_with_error_code!(double_fault_handler, "DOUBLE FAULT");
 fatal_with_error_code!(invalid_tss_handler, "INVALID TSS");
 fatal_with_error_code!(segment_not_present_handler, "SEGMENT NOT PRESENT");
 fatal_with_error_code!(stack_segment_fault_handler, "STACK-SEGMENT FAULT");
@@ -134,10 +125,10 @@ fn report_exception(name: &'static str, frame: &InterruptStackFrame, error_code:
             "kernel"
         }
     );
-    println!("RIP: {:#X}", frame.instruction_pointer.as_u64());
+    println!("RIP: {:#X}", frame.instruction_pointer.as_usize());
     println!("CS: {:#X}", frame.code_segment);
     println!("FLAGS: {:#X}", frame.cpu_flags);
-    println!("RSP: {:#X}", frame.stack_pointer.as_u64());
+    println!("RSP: {:#X}", frame.stack_pointer.as_usize());
     println!("SS: {:#X}", frame.stack_segment);
 
     if let Some(error_code) = error_code {

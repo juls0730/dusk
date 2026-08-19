@@ -33,16 +33,16 @@ static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 pub struct BootInfo {
     pub kernel_address: crate::memory::PhysicalAddr,
-    pub hhdm_offset: u64,
+    pub hhdm_offset: usize,
     entries: &'static [&'static limine_api::memmap::Entry],
 }
 
 impl BootInfo {
-    pub fn memory_regions(&self) -> impl Iterator<Item = crate::memory::MemoryRegion> + '_ {
+    pub fn memory_regions(&self) -> impl Iterator<Item = crate::memory::MemoryRegion> + Clone + '_ {
         use crate::memory::{MemoryRegion, MemoryRegionKind};
         self.entries.iter().map(|&entry| MemoryRegion {
-            start: crate::memory::PhysicalAddr::new(entry.base),
-            length: entry.length,
+            start: crate::memory::PhysicalAddr::new(entry.base as usize),
+            length: entry.length as usize,
             kind: match entry.type_ {
                 limine_api::memmap::MEMMAP_USABLE => MemoryRegionKind::Usable,
                 limine_api::memmap::MEMMAP_RESERVED => MemoryRegionKind::Reserved,
@@ -91,8 +91,8 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
         .entries();
 
     Ok(BootInfo {
-        kernel_address: crate::memory::PhysicalAddr::new(kernel_address),
-        hhdm_offset,
+        kernel_address: crate::memory::PhysicalAddr::new(kernel_address as usize),
+        hhdm_offset: hhdm_offset as usize,
         entries: memmap,
     })
 }

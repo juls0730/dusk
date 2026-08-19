@@ -50,6 +50,7 @@ pub(super) const KERNEL_DATA_SELECTOR: u16 = 2 * 8;
 pub(super) const TSS_SELECTOR: u16 = 3 * 8;
 
 #[repr(align(16))]
+#[allow(dead_code)] // field 0 is read, rust just cant tell
 struct ExceptionStack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
 static mut GDT: Gdt = Gdt::new();

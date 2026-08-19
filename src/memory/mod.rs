@@ -1,32 +1,36 @@
+mod frame;
+
+pub use frame::{FRAME_SIZE, FrameAllocator, PhysicalFrame};
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PhysicalAddr(u64);
+pub struct PhysicalAddr(usize);
 
 impl PhysicalAddr {
-    pub fn new(addr: u64) -> Self {
+    pub fn new(addr: usize) -> Self {
         Self(addr)
     }
 
-    pub const fn as_u64(self) -> u64 {
+    pub const fn as_usize(self) -> usize {
         self.0
     }
 }
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VirtualAddr(u64);
+pub struct VirtualAddr(usize);
 
 impl VirtualAddr {
-    pub fn new(addr: u64) -> Self {
+    pub fn new(addr: usize) -> Self {
         Self(addr)
     }
 
-    pub const fn as_u64(self) -> u64 {
-        self.0
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
     }
 
     pub unsafe fn as_mut_ptr<T>(self) -> *mut T {
-        self.as_u64() as *mut T
+        self.as_usize() as *mut T
     }
 }
 
@@ -46,6 +50,23 @@ pub enum MemoryRegionKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryRegion {
     pub start: PhysicalAddr,
-    pub length: u64,
+    pub length: usize,
     pub kind: MemoryRegionKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DirectMap {
+    offset: usize,
+}
+
+impl DirectMap {
+    pub fn new(offset: usize) -> Self {
+        Self { offset }
+    }
+
+    pub fn translate(self, addr: PhysicalAddr) -> Option<VirtualAddr> {
+        addr.as_usize()
+            .checked_add(self.offset)
+            .map(VirtualAddr::new)
+    }
 }
