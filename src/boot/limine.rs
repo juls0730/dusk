@@ -3,6 +3,8 @@ use ::limine as limine_api;
 use limine_api::request::{ExecutableAddressRequest, HhdmRequest, MemmapRequest};
 use limine_api::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
+use crate::memory::{KernelImage, PhysicalAddr, VirtualAddr};
+
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
 /// Be sure to mark all limine requests with #[used], otherwise they may be removed by the compiler.
@@ -32,7 +34,7 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 pub struct BootInfo {
-    pub kernel_address: crate::memory::PhysicalAddr,
+    pub kernel_address: KernelImage,
     pub hhdm_offset: usize,
     entries: &'static [&'static limine_api::memmap::Entry],
 }
@@ -69,6 +71,7 @@ pub enum BootError {
     FailedToGetKernelAddress,
     FailedToGetHHDMAddress,
     FailedToGetMemmap,
+    FailedToLocateKernel,
 }
 
 pub fn load_boot_info() -> Result<BootInfo, BootError> {
@@ -78,8 +81,7 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
 
     let kernel_address = KERNEL_ADDRESS_REQUEST
         .response()
-        .ok_or(BootError::FailedToGetKernelAddress)?
-        .physical_base;
+        .ok_or(BootError::FailedToGetKernelAddress)?;
     let hhdm_offset = HHDM_REQUEST
         .response()
         .ok_or(BootError::FailedToGetHHDMAddress)?
@@ -90,8 +92,28 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
         .ok_or(BootError::FailedToGetMemmap)?
         .entries();
 
+    let mut kernel_length = None;
+    for &entry in memmap.iter() {
+        if entry.type_ != limine_api::memmap::MEMMAP_EXECUTABLE_AND_MODULES {
+            continue;
+        }
+
+        if entry.base != kernel_address.physical_base {
+            continue;
+        }
+
+        kernel_length = Some(entry.length as usize);
+        break;
+    }
+
+    let kernel_length = kernel_length.ok_or(BootError::FailedToLocateKernel)?;
+
     Ok(BootInfo {
-        kernel_address: crate::memory::PhysicalAddr::new(kernel_address as usize),
+        kernel_address: KernelImage {
+            physical_base: PhysicalAddr::new(kernel_address.physical_base as usize),
+            virtual_base: VirtualAddr::new(kernel_address.virtual_base as usize),
+            length: kernel_length,
+        },
         hhdm_offset: hhdm_offset as usize,
         entries: memmap,
     })

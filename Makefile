@@ -117,26 +117,29 @@ copy-iso-files:
 partition-iso: copy-iso-files
 		# Make empty ISO of 64M in size
 		dd if=/dev/zero of=${IMAGE_PATH} bs=1M count=0 seek=${ISO_SIZE}
-		parted -s ${IMAGE_PATH} mklabel gpt
-		parted -s ${IMAGE_PATH} mkpart BIOSBOOT 1024s 2047s
-		parted -s ${IMAGE_PATH} set 1 bios_grub on
-
-		parted -s ${IMAGE_PATH} mkpart ESP fat${ESP_BITS} 2048s 262144s
+ifneq (${UEFI},)
+	parted -s ${IMAGE_PATH} mklabel gpt
+	parted -s ${IMAGE_PATH} mkpart ESP fat${ESP_BITS} 2048s 262144s
+	parted -s ${IMAGE_PATH} set 1 esp on
+else
+	parted -s ${IMAGE_PATH} mklabel msdos
+	parted -s ${IMAGE_PATH} mkpart primary fat${ESP_BITS} 2048s 262144s
+	parted -s ${IMAGE_PATH} set 1 boot on
+endif
 
 		# Make ISO with 1 partition starting at sector 2048 that is 32768 sectors, or 16MiB, in size
 		# Then a second partition spanning the rest of the disk
 		parted -s ${IMAGE_PATH} mkpart primary 262145s 100%
-		parted -s ${IMAGE_PATH} set 2 esp on
 
 build-iso: partition-iso 
-ifeq (${ARCH},x86_64)
-		# Install the Limine bootloader for bios installs
-		./limine/limine bios-install ${IMAGE_PATH}
+ifeq (${UEFI},)
+	# install limine for legacy bios
+	./limine/limine bios-install ${IMAGE_PATH}
 endif
 
 		sudo losetup -Pf --show ${IMAGE_PATH} > loopback_dev
-		sudo mkfs.fat -F ${ESP_BITS} `cat loopback_dev`p2
-		sudo mount `cat loopback_dev`p2 ${ARTIFACTS_PATH}/mnt
+		sudo mkfs.fat -F ${ESP_BITS} `cat loopback_dev`p1
+		sudo mount `cat loopback_dev`p1 ${ARTIFACTS_PATH}/mnt
 		sudo cp -r ${ISO_PATH}/* ${ARTIFACTS_PATH}/mnt
 		sync
 		sudo umount ${ARTIFACTS_PATH}/mnt
@@ -158,13 +161,13 @@ compile-bootloader:
 compile-binaries:
 		cargo build ${CARGO_OPTS}
 
-ovmf-x86_64: ovmf
+ovmf-x86_64:
 	mkdir -p ovmf/ovmf-x86_64
 	@if [ ! -d "ovmf/ovmf-x86_64/OVMF.fd" ]; then \
 		cd ovmf/ovmf-x86_64 && curl -Lo OVMF.fd https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd; \
 	fi
 
-ovmf-aarch64: ovmf
+ovmf-aarch64:
 	mkdir -p ovmf/ovmf-aarch64
 	@if [ ! -d "ovmf/ovmf-aarch64/OVMF.fd" ]; then \
 		cd ovmf/ovmf-aarch64 && curl -o OVMF.fd https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd; \
@@ -174,9 +177,13 @@ ovmf-aarch64: ovmf
 # gdb target/x86_64-unknown-none/debug/CappuccinOS.elf -ex "target remote :1234"
 
 run: build ${RUN_OPTS} run-${ARCH}
+run-serial: build ${RUN_OPTS} run-${ARCH}-serial
 
 run-x86_64:
 	tmux new-session -d -s qemu 'qemu-system-x86_64 ${QEMU_OPTS}'
+
+run-x86_64-serial:
+	qemu-system-x86_64 ${QEMU_OPTS} -boot d -display none -serial stdio -monitor none -no-reboot -no-shutdown
 
 line-count:
 		cloc --quiet --exclude-dir=bin --include-lang=Rust --csv src/ | tail -n 1 | awk -F, '{print $$5}'

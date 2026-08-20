@@ -1,5 +1,6 @@
 mod gdt;
 mod interrupts;
+pub mod paging;
 pub mod port;
 
 use core::arch::asm;

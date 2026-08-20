@@ -2,6 +2,13 @@ mod frame;
 
 pub use frame::{FRAME_SIZE, FrameAllocator, PhysicalFrame};
 
+#[derive(Debug, Clone, Copy)]
+pub struct KernelImage {
+    pub physical_base: PhysicalAddr,
+    pub virtual_base: VirtualAddr,
+    pub length: usize,
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicalAddr(usize);
@@ -31,6 +38,10 @@ impl VirtualAddr {
 
     pub unsafe fn as_mut_ptr<T>(self) -> *mut T {
         self.as_usize() as *mut T
+    }
+
+    pub unsafe fn as_ptr<T>(self) -> *const T {
+        self.as_usize() as *const T
     }
 }
 

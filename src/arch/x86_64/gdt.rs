@@ -57,10 +57,10 @@ static mut GDT: Gdt = Gdt::new();
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 static mut DOUBLE_FAULT_STACK: ExceptionStack = ExceptionStack([0; DOUBLE_FAULT_STACK_SIZE]);
 
-pub fn init() {
-    const _: () = assert!(core::mem::size_of::<TaskStateSegment>() == 104);
-    const _: () = assert!(core::mem::size_of::<GdtPointer>() == 10);
+const _: () = assert!(core::mem::size_of::<TaskStateSegment>() == 104);
+const _: () = assert!(core::mem::size_of::<GdtPointer>() == 10);
 
+pub fn init() {
     unsafe {
         let stack_bottom = core::ptr::addr_of_mut!(DOUBLE_FAULT_STACK) as u64;
         let stack_top = stack_bottom + DOUBLE_FAULT_STACK_SIZE as u64;

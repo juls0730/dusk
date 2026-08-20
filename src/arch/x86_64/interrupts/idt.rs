@@ -89,11 +89,11 @@ impl Idt {
 
 static mut IDT: Idt = Idt::new();
 
-pub fn idt_init() {
-    const _: () = assert!(core::mem::size_of::<IdtEntry>() == 16);
-    const _: () = assert!(core::mem::size_of::<IdtPointer>() == 10);
-    const _: () = assert!(core::mem::size_of::<InterruptStackFrame>() == 40);
+const _: () = assert!(core::mem::size_of::<IdtEntry>() == 16);
+const _: () = assert!(core::mem::size_of::<IdtPointer>() == 10);
+const _: () = assert!(core::mem::size_of::<InterruptStackFrame>() == 40);
 
+pub fn idt_init() {
     let mut idt = Idt::new();
 
     exceptions::install(&mut idt);
