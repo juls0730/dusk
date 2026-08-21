@@ -25,7 +25,10 @@ SECTIONS
     /* that is the beginning of the region. */
     /* Additionally, leave space for the ELF headers by adding SIZEOF_HEADERS to the */
     /* base load address. */
-    . = 0xffffffff80000000 + SIZEOF_HEADERS;
+    . = 0xffffffff80000000;
+
+    __text_start = .;
+    . += SIZEOF_HEADERS;
 
     .text : {
         *(.text .text.*)
@@ -33,6 +36,8 @@ SECTIONS
 
     /* Move to the next memory page for .rodata */
     . = ALIGN(CONSTANT(MAXPAGESIZE));
+    __text_end = .;
+    __rodata_start = .;
 
     .rodata : {
         *(.rodata .rodata.*)
@@ -40,7 +45,9 @@ SECTIONS
 
     /* Move to the next memory page for .data */
     . = ALIGN(CONSTANT(MAXPAGESIZE));
-
+    __rodata_end = .;
+    __data_start = .;
+    
     .data : {
         *(.data .data.*)
 
@@ -56,6 +63,11 @@ SECTIONS
         *(.dynamic)
     } :data :dynamic
 
+    .got : {
+        *(.got .got.*)
+        *(.got.plt .got.plt.*)
+    } :data
+
     /* NOTE: .bss needs to be the last thing mapped to :data, otherwise lots of */
     /* unnecessary zeros will be written to the binary. */
     /* If you need, for example, .init_array and .fini_array, those should be placed */
@@ -64,6 +76,9 @@ SECTIONS
         *(.bss .bss.*)
         *(COMMON)
     } :data
+
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+    __data_end = .;
 
     /* Discard .note.* and .eh_frame* since they may cause issues on some hosts. */
     /* Also discard the program interpreter section since we do not need one. This is */

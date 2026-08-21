@@ -1,6 +1,6 @@
 ARTIFACTS_PATH ?= bin
 IMAGE_NAME ?= dusk.iso
-MODE ?= release
+MODE ?= debug
 ARCH ?= x86_64
 MEMORY ?= 512M
 # In MB
@@ -36,18 +36,9 @@ ifneq (${GDB},)
 	QEMU_OPTS += -s -S
 endif
 
-ifeq (${ARCH},aarch64)
-	LIMINE_BOOT_VARIATION := AA64
-	UEFI := true
-endif
-
 ifneq (${UEFI},)
 	RUN_OPTS := ovmf-${ARCH}
-	ifeq (${ARCH},aarch64)
-		QEMU_OPTS += -M virt -bios ovmf/ovmf-${ARCH}/OVMF.fd
-	else
-		QEMU_OPTS += -bios ovmf/ovmf-${ARCH}/OVMF.fd
-	endif
+	QEMU_OPTS += -bios ovmf/ovmf-${ARCH}/OVMF.fd
 endif
 
 .PHONY: all build
@@ -57,7 +48,7 @@ all: build
 build: prepare-bin-files compile-bootloader compile-binaries run-scripts build-iso
 
 check: 
-		cargo check
+		cargo check -Zjson-target-spec
 
 prepare-bin-files:
 		# Remove ISO and everything in the bin directory
@@ -69,34 +60,10 @@ prepare-bin-files:
 		mkdir -p ${ISO_PATH}
 		# mkdir -p ${INITRAMFS_PATH}
 		mkdir -p ${ARTIFACTS_PATH}/mnt
-
-#copy-initramfs-files:
-#		echo "Hello World from Initramfs" > ${INITRAMFS_PATH}/example.txt
-#		echo "Second file for testing" > ${INITRAMFS_PATH}/example2.txt
-#		mkdir -p ${INITRAMFS_PATH}/firstdir/seconddirbutlonger/
-#		mkdir ${INITRAMFS_PATH}/mnt/
-#		echo "Nexted file reads!!" > ${INITRAMFS_PATH}/firstdir/seconddirbutlonger/yeah.txt
-
-#compile-initramfs: copy-initramfs-files
-#		# Make squashfs without compression temporaily so I can get it working before I have to write a gzip driver
-#		mksquashfs ${INITRAMFS_PATH} ${ARTIFACTS_PATH}/initramfs.img ${MKSQUASHFS_OPTS}
-
 run-scripts:
 		# Place the build ID into the binary so it can be read at runtime
 		@HASH=$$(md5sum ${KERNEL_FILE} | cut -c1-12) && \
 		sed -i "s/__BUILD_ID__/$${HASH}/" ${KERNEL_FILE}
-
-#ifeq (${EXPORT_SYMBOLS},true)
-#		nm ${KERNEL_FILE} > scripts/symbols.table
-#		@if [ ! -d "scripts/rustc_demangle" ]; then \
-#			git clone "https://github.com/juls0730/rustc_demangle.py" "scripts/rustc_demangle"; \
-#		fi
-#		python scripts/demangle-symbols.py
-#		mv scripts/symbols.table ${INITRAMFS_PATH}/
-#endif
-
-#		python scripts/font.py
-#		mv scripts/font.psf ${INITRAMFS_PATH}/
 
 		#python scripts/initramfs-test.py 100 ${INITRAMFS_PATH}/
 
@@ -167,12 +134,6 @@ ovmf-x86_64:
 		cd ovmf/ovmf-x86_64 && curl -Lo OVMF.fd https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd; \
 	fi
 
-ovmf-aarch64:
-	mkdir -p ovmf/ovmf-aarch64
-	@if [ ! -d "ovmf/ovmf-aarch64/OVMF.fd" ]; then \
-		cd ovmf/ovmf-aarch64 && curl -o OVMF.fd https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd; \
-	fi
-
 # In debug mode, open a terminal and run this command:
 # gdb target/x86_64-unknown-none/debug/CappuccinOS.elf -ex "target remote :1234"
 
@@ -183,7 +144,7 @@ run-x86_64:
 	tmux new-session -d -s qemu 'qemu-system-x86_64 ${QEMU_OPTS}'
 
 run-x86_64-serial:
-	qemu-system-x86_64 ${QEMU_OPTS} -boot d -display none -serial stdio -monitor none -no-reboot -no-shutdown
+	qemu-system-x86_64 ${QEMU_OPTS} -boot d -display none -serial stdio -monitor none -no-reboot
 
 line-count:
 		cloc --quiet --exclude-dir=bin --include-lang=Rust --csv src/ | tail -n 1 | awk -F, '{print $$5}'

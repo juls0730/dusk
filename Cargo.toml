@@ -5,3 +5,8 @@ edition = "2024"
 
 [dependencies]
 limine = "0.6.5"
+
+[[bin]]
+name = "dusk"
+test = false
+bench = false

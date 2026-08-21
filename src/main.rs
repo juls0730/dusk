@@ -9,32 +9,37 @@ mod debug;
 mod memory;
 
 use crate::{
-    arch::paging,
     debug::serial,
-    memory::{PhysicalAddr, VirtualAddr},
+    memory::{AddressSpace, PagePermissions, PhysicalAddr, VirtualAddr},
 };
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     serial::init().unwrap();
 
-    arch::init();
+    let arch_state = arch::init();
     let boot_info = boot::load_boot_info().unwrap();
     let direct_map = memory::DirectMap::new(boot_info.hhdm_offset);
 
     let mut allocator = memory::FrameAllocator::new(boot_info.memory_regions(), direct_map)
         .expect("failed to create frame allocator");
 
-    let mut page_table = paging::AddressSpace::new(
+    println!("Initializing page table...");
+    let mut page_table = AddressSpace::new_kernel(
         direct_map,
         boot_info.memory_regions(),
-        boot_info.kernel_address,
+        &boot_info.kernel_layout,
+        arch_state.paging,
         &mut allocator,
     )
     .expect("failed to create page table");
 
+    println!("Activating page table...");
+
     // safety: trust me bro
     unsafe { page_table.activate() };
+
+    println!("Allocating a frame...");
 
     let frame = allocator.alloc().unwrap();
 
@@ -47,13 +52,15 @@ pub extern "C" fn _start() -> ! {
 
     assert!(page_table.translate(new_virtual).is_none());
 
-    let page = paging::Page::from_start_address(new_virtual).unwrap();
-
     page_table
         .map(
-            page,
-            frame,
-            paging::PagePermissions::KERNEL_DATA,
+            frame.start_address(),
+            new_virtual,
+            PagePermissions {
+                writable: true,
+                executable: false,
+                user_accessible: true,
+            },
             &mut allocator,
         )
         .unwrap();
@@ -79,7 +86,7 @@ pub extern "C" fn _start() -> ! {
 
     println!("{:#X}", slice[0]);
 
-    let unmapped_frame = page_table.unmap(page, &mut allocator).unwrap();
+    let unmapped_frame = unsafe { page_table.unmap(new_virtual, &mut allocator) }.unwrap();
 
     assert_eq!(unmapped_frame, frame);
 

@@ -19,6 +19,7 @@ enum FrameState {
     Allocated = 0b10,
 }
 
+// 64 KiB per GiB
 #[derive(Debug)]
 struct Bitmap {
     start: VirtualAddr,
@@ -68,7 +69,7 @@ pub enum FrameAllocatorInitError {
     BitmapOutsideDirectMap,
 }
 
-// very very simple linked list frame/page allocator
+// very very simple bitmap frame/page allocator
 #[derive(Debug)]
 pub struct FrameAllocator {
     bitmap: Bitmap,

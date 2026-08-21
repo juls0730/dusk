@@ -3,7 +3,10 @@ use ::limine as limine_api;
 use limine_api::request::{ExecutableAddressRequest, HhdmRequest, MemmapRequest};
 use limine_api::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
-use crate::memory::{KernelImage, PhysicalAddr, VirtualAddr};
+use crate::memory::{
+    KernelMemoryLayout, KernelSegment, PagePermissions, PhysicalAddr, VirtualAddr,
+};
+use crate::println;
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -33,8 +36,19 @@ static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 #[unsafe(link_section = ".requests_end_marker")]
 static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
+unsafe extern "C" {
+    static __text_start: u64;
+    static __text_end: u64;
+
+    static __rodata_start: u64;
+    static __rodata_end: u64;
+
+    static __data_start: u64;
+    static __data_end: u64;
+}
+
 pub struct BootInfo {
-    pub kernel_address: KernelImage,
+    pub kernel_layout: KernelMemoryLayout,
     pub hhdm_offset: usize,
     entries: &'static [&'static limine_api::memmap::Entry],
 }
@@ -92,27 +106,74 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
         .ok_or(BootError::FailedToGetMemmap)?
         .entries();
 
-    let mut kernel_length = None;
-    for &entry in memmap.iter() {
-        if entry.type_ != limine_api::memmap::MEMMAP_EXECUTABLE_AND_MODULES {
-            continue;
-        }
+    let mut segment_physical = kernel_address.physical_base as usize;
+    let mut segment_virtual = core::ptr::addr_of!(__text_start) as usize;
 
-        if entry.base != kernel_address.physical_base {
-            continue;
-        }
+    let mut segment_length = 0;
 
-        kernel_length = Some(entry.length as usize);
-        break;
+    let kernel_text_segment = KernelSegment {
+        physical_base: PhysicalAddr::new(segment_physical),
+        virtual_base: VirtualAddr::new(segment_virtual),
+        length: (core::ptr::addr_of!(__text_end) as usize)
+            - (core::ptr::addr_of!(__text_start) as usize),
+        permissions: PagePermissions::new(false, true, false),
+    };
+
+    segment_length += kernel_text_segment.length;
+
+    segment_virtual = core::ptr::addr_of!(__rodata_start) as usize;
+    segment_physical = kernel_address.physical_base as usize
+        + (segment_virtual - kernel_address.virtual_base as usize);
+
+    let kernel_rodata_segment = KernelSegment {
+        physical_base: PhysicalAddr::new(segment_physical),
+        virtual_base: VirtualAddr::new(segment_virtual),
+        length: (core::ptr::addr_of!(__rodata_end) as usize)
+            - (core::ptr::addr_of!(__rodata_start) as usize),
+        permissions: PagePermissions::new(false, false, false),
+    };
+
+    segment_length += kernel_rodata_segment.length;
+
+    segment_virtual = core::ptr::addr_of!(__data_start) as usize;
+    segment_physical = kernel_address.physical_base as usize
+        + (segment_virtual - kernel_address.virtual_base as usize);
+
+    let kernel_data_segment = KernelSegment {
+        physical_base: PhysicalAddr::new(segment_physical),
+        virtual_base: VirtualAddr::new(segment_virtual),
+        length: (core::ptr::addr_of!(__data_end) as usize)
+            - (core::ptr::addr_of!(__data_start) as usize),
+        permissions: PagePermissions::new(true, false, false),
+    };
+
+    segment_length += kernel_data_segment.length;
+
+    #[cfg(debug_assertions)]
+    {
+        let mut kernel_length = None;
+        for &entry in memmap.iter() {
+            if entry.type_ != limine_api::memmap::MEMMAP_EXECUTABLE_AND_MODULES {
+                continue;
+            }
+
+            if entry.base != kernel_address.physical_base {
+                continue;
+            }
+
+            kernel_length = Some(entry.length as usize);
+            break;
+        }
+        debug_assert_eq!(segment_length, kernel_length.unwrap());
     }
 
-    let kernel_length = kernel_length.ok_or(BootError::FailedToLocateKernel)?;
-
     Ok(BootInfo {
-        kernel_address: KernelImage {
-            physical_base: PhysicalAddr::new(kernel_address.physical_base as usize),
-            virtual_base: VirtualAddr::new(kernel_address.virtual_base as usize),
-            length: kernel_length,
+        kernel_layout: KernelMemoryLayout {
+            segments: [
+                kernel_text_segment,
+                kernel_rodata_segment,
+                kernel_data_segment,
+            ],
         },
         hhdm_offset: hhdm_offset as usize,
         entries: memmap,
