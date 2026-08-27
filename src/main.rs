@@ -15,6 +15,7 @@ use crate::{
 };
 
 #[derive(Debug)]
+#[allow(unused)]
 enum KernelStackCreateError {
     AddressOverflow,
     OutOfFrames,
@@ -193,12 +194,6 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
             .expect("failed to initialize interrupt controller");
 
     println!("interrupt controller: {:?}", interrupt_controller);
-
-    println!("delaying 5 seconds...");
-    interrupt_controller
-        .delay(core::time::Duration::from_secs(5))
-        .unwrap();
-    println!("done!");
 
     hcf();
 }

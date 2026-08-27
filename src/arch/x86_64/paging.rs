@@ -123,7 +123,7 @@ impl PageTableEntry {
 
     const WRITE_THROUGH: u64 = 1 << 3;
     const CACHE_DISABLED: u64 = 1 << 4;
-    const PAT: u64 = 1 << 7;
+    // const PAT: u64 = 1 << 7;
 
     const fn new(
         physical_address: PhysicalAddr,

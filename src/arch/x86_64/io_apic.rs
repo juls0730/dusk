@@ -2,11 +2,10 @@ use crate::{
     memory::{
         AddressSpace, CachePolicy, FrameAllocator, PagePermissions, PhysicalAddr, VirtualAddr,
     },
-    platform::acpi::{InterruptPolarity, IoApicInfo, TriggerMode},
+    platform::acpi::{InterruptPolarity, TriggerMode},
     println,
 };
 
-const IOREGSEL: usize = 0x00;
 const IOWIN: usize = 0x10;
 
 const IOAPIC_ID: u8 = 0x00;
@@ -130,17 +129,6 @@ impl IoApic {
             Some(index) => index < self.redirection_entry_count,
             None => false,
         }
-    }
-
-    fn read_redirection(&mut self, gsi: u32) -> Result<u64, IoApicError> {
-        let index = self.redirection_index(gsi)?;
-        let register = u8::try_from(IOAPIC_REDIRECTION_BASE as u32 + index * 2)
-            .map_err(|_| IoApicError::InvalidRedirectionIndex)?;
-
-        let low = self.read(register);
-        let high = self.read(register + 1);
-
-        Ok((high as u64) << 32 | low as u64)
     }
 
     fn redirection_registers(&mut self, gsi: u32) -> Result<(u8, u8), IoApicError> {

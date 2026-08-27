@@ -4,7 +4,6 @@ use crate::{
         CachePolicy, DirectMap, FRAME_SIZE, FrameAddr, FrameAllocator, KernelMemoryLayout,
         MemoryRegion, MemoryRegionKind, PagePermissions, PhysicalAddr, VirtualAddr,
     },
-    println,
 };
 
 #[derive(Debug)]
@@ -18,7 +17,6 @@ pub enum MapError {
     AlreadyMapped,
     MappingConflict,
     UnsupportedPermissions,
-    OutsideAddressSpace,
     OutOfMemory,
     PageTableUnavailable,
     CorruptedPageTable,
@@ -46,7 +44,6 @@ pub enum UnmapError {
     VirtualAddressUnaligned,
     NotMapped,
     MappingConflict,
-    OutsideAddressSpace,
     PageTableUnavailable,
     CorruptedPageTable,
 }
@@ -65,6 +62,7 @@ impl From<PageTableUnmapError> for UnmapError {
 }
 
 #[derive(Debug)]
+#[allow(unused)]
 pub enum AddressSpaceCreateError {
     AddressOutsideDirectMap,
     PhysicalAddressTooLarge,

@@ -1,6 +1,4 @@
-use crate::memory::{
-    AddressSpace, CachePolicy, DirectMap, FrameAllocator, PhysicalAddr, VirtualAddr,
-};
+use crate::memory::{DirectMap, PhysicalAddr, VirtualAddr};
 
 #[derive(Debug)]
 pub enum AcpiError {
@@ -10,9 +8,7 @@ pub enum AcpiError {
     InvalidRootTableLength,
     MalformedAcpiTable,
     MalformedMadt,
-    MissingMadt,
     MissingIoApic,
-    MissingIsaIrqRoute,
     MultipleIoApicsUnsupported,
 }
 
@@ -296,6 +292,7 @@ pub struct Sdt {
 }
 
 #[derive(Debug)]
+#[allow(unused)]
 pub struct Madt<'a> {
     acpi: &'a AcpiTables,
     table: Sdt,
@@ -638,6 +635,7 @@ pub struct LocalX2ApicEntry {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(unused)]
 pub enum MadtEntry {
     LocalApic(LocalApicEntry),
     IoApic(IoApicEntry),

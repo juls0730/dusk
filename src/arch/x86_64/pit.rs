@@ -1,5 +1,3 @@
-use core::arch::asm;
-
 use crate::arch::port::write_u8;
 
 const PIT_CHANNEL_0: u16 = 0x40;

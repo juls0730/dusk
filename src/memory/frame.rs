@@ -283,14 +283,6 @@ impl FrameAllocator {
         };
     }
 
-    pub const fn free_frames(&self) -> usize {
-        self.free_frames
-    }
-
-    pub const fn allocatable_frames(&self) -> usize {
-        self.allocatable_frames
-    }
-
     fn usable_frame_range(
         region: MemoryRegion,
     ) -> Result<core::ops::Range<usize>, FrameAllocatorInitError> {

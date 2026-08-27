@@ -1,6 +1,7 @@
 mod address_space;
 mod frame;
 
+#[allow(unused)]
 pub use address_space::{AddressSpace, AddressSpaceCreateError, MapError, UnmapError};
 pub use frame::{FRAME_SIZE, FrameAddr, FrameAllocator, OwnedFrame};
 

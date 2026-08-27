@@ -2,16 +2,11 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::{
     arch::{
-        disable_interrupts,
         port::write_u8,
         x86_64::{
             cpu::{read_msr, write_msr},
-            interrupts::{
-                apic_vectors::{
-                    APIC_ERROR_VECTOR, APIC_SELF_IPI_VECTOR, APIC_SPURIOUS_VECTOR,
-                    APIC_TIMER_VECTOR,
-                },
-                enable_interrupts,
+            interrupts::apic_vectors::{
+                APIC_ERROR_VECTOR, APIC_SPURIOUS_VECTOR, APIC_TIMER_VECTOR,
             },
         },
     },
@@ -22,7 +17,6 @@ use crate::{
 };
 
 const APIC_ID: u32 = 0x20;
-const APIC_VERSION: u32 = 0x30;
 // End Of Interrupt
 const APIC_EOI: u32 = 0xB0;
 // Task Priority Register
@@ -37,10 +31,6 @@ const APIC_LVT_MASKED: u64 = 1 << 16;
 const APIC_LVT_TIMER_MODE_PERIODIC: u64 = 1 << 17;
 
 pub const LOCAL_APIC_VIRTUAL_ADDRESS: VirtualAddr = VirtualAddr::new(0xFFFF_FFFD_0000_0000);
-
-const APIC_ICR1: u32 = 0x300;
-const APIC_ICR2: u32 = 0x310;
-const X2APIC_SELF_IPI: u32 = 0x3F0;
 
 const APIC_LVT_TIMER: u32 = 0x320;
 const APIC_TIMER_INITIAL_COUNT: u32 = 0x380;
@@ -86,29 +76,6 @@ impl LocalApicAccess {
         }
     }
 
-    fn send_self_ipi(&self, vector: u8) -> Result<(), LocalApicError> {
-        match self {
-            Self::X2Apic => {
-                unsafe { write_msr(0x800 + X2APIC_SELF_IPI / 16, vector as u64) };
-            }
-            Self::XApic => {
-                unsafe {
-                    // bit 18 = destination type. 1 = self
-                    let interrupt_command = vector as u32 | (1 << 18);
-                    core::ptr::write_volatile(
-                        LOCAL_APIC_VIRTUAL_ADDRESS
-                            .as_mut_ptr::<u8>()
-                            .add(APIC_ICR1 as usize)
-                            .cast::<u32>(),
-                        interrupt_command,
-                    );
-                };
-            }
-        };
-
-        Ok(())
-    }
-
     fn end_of_interrupt(&self) {
         self.write(APIC_EOI, 0);
     }
@@ -118,9 +85,7 @@ impl LocalApicAccess {
 pub enum LocalApicError {
     AddressMismatch,
     ApicDisabled,
-    TimerTestFailed,
     FailedToMapApic,
-    FailedToSendSelfIpi,
     NotBootSystemProcessor,
 }
 
@@ -137,8 +102,6 @@ const APIC_BASE_X2APIC_ENABLE: u64 = 1 << 10;
 const APIC_BASE_GLOBAL_ENABLE: u64 = 1 << 11;
 // TODO: use MAXPHYADDR
 const APIC_BASE_ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-
-static SELF_IPI_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 impl LocalApic {
     pub fn init(
@@ -196,10 +159,7 @@ impl LocalApic {
             LocalApicAccess::X2Apic => raw_id as u32,
         };
 
-        let version = access.read(APIC_VERSION);
-        let max_lvt_entries = ((version >> 16) & 0xFF) + 1;
-        let version = version & 0xFF;
-
+        // ensure legacy PIC is disabled
         unsafe {
             write_u8(0x21, 0xFF);
             write_u8(0xA1, 0xFF);
@@ -212,42 +172,6 @@ impl LocalApic {
         access.write(APIC_SVR, (1 << 8) | APIC_SPURIOUS_VECTOR as u64);
 
         Ok(Self { id, access })
-    }
-
-    pub fn test_timer_interrupt(&self) -> Result<(), LocalApicError> {
-        self.access
-            .write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64 | APIC_LVT_MASKED);
-
-        // Divide by 16
-        self.access.write(APIC_TIMER_DIVIDE_CONFIG, 0b11);
-
-        APIC_TIMER_COUNT.store(0, Ordering::SeqCst);
-
-        self.access.write(APIC_TIMER_INITIAL_COUNT, 123456);
-
-        self.access.write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64);
-
-        enable_interrupts();
-
-        for _ in 0..10_000_000 {
-            if APIC_TIMER_COUNT.load(Ordering::SeqCst) != 0 {
-                break;
-            }
-
-            core::hint::spin_loop();
-        }
-
-        disable_interrupts();
-
-        self.access
-            .write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64 | APIC_LVT_MASKED);
-        self.access.write(APIC_TIMER_INITIAL_COUNT, 0);
-
-        if APIC_TIMER_COUNT.load(Ordering::SeqCst) != 1 {
-            return Err(LocalApicError::TimerTestFailed);
-        }
-
-        Ok(())
     }
 
     pub fn start_timer(&self) {
@@ -268,51 +192,27 @@ impl LocalApic {
         self.access.write(APIC_TIMER_INITIAL_COUNT, 0);
     }
 
-    pub fn send_self_ipi(&self) -> Result<(), LocalApicError> {
-        SELF_IPI_COUNTER.store(0, Ordering::SeqCst);
+    // pub fn delay_ticks(&self, count: u32) {
+    //     if count == 0 {
+    //         return;
+    //     }
 
-        self.access.send_self_ipi(APIC_SELF_IPI_VECTOR)?;
+    //     APIC_TIMER_COUNT.store(0, Ordering::SeqCst);
 
-        enable_interrupts();
+    //     self.access
+    //         .write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64 | APIC_LVT_MASKED);
+    //     self.access.write(APIC_TIMER_DIVIDE_CONFIG, 0b11);
+    //     self.access.write(APIC_TIMER_INITIAL_COUNT, count as u64);
+    //     self.access.write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64);
 
-        for _ in 0..10_000_000 {
-            if SELF_IPI_COUNTER.load(Ordering::SeqCst) != 0 {
-                break;
-            }
+    //     while APIC_TIMER_COUNT.load(Ordering::SeqCst) == 0 {
+    //         unsafe {
+    //             core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack));
+    //         }
+    //     }
 
-            core::hint::spin_loop();
-        }
-
-        disable_interrupts();
-
-        if SELF_IPI_COUNTER.load(Ordering::SeqCst) != 1 {
-            return Err(LocalApicError::FailedToSendSelfIpi);
-        }
-
-        Ok(())
-    }
-
-    pub fn delay_ticks(&self, count: u32) {
-        if count == 0 {
-            return;
-        }
-
-        APIC_TIMER_COUNT.store(0, Ordering::SeqCst);
-
-        self.access
-            .write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64 | APIC_LVT_MASKED);
-        self.access.write(APIC_TIMER_DIVIDE_CONFIG, 0b11);
-        self.access.write(APIC_TIMER_INITIAL_COUNT, count as u64);
-        self.access.write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64);
-
-        while APIC_TIMER_COUNT.load(Ordering::SeqCst) == 0 {
-            unsafe {
-                core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack));
-            }
-        }
-
-        self.stop_timer();
-    }
+    //     self.stop_timer();
+    // }
 
     pub fn id(&self) -> u32 {
         self.id
@@ -335,10 +235,6 @@ pub fn current_timer_count() -> u32 {
 
 pub(super) fn end_of_interrupt() {
     current_access().end_of_interrupt();
-}
-
-pub(super) fn record_self_ipi() {
-    SELF_IPI_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 static APIC_ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
