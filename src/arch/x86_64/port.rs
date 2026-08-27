@@ -8,7 +8,7 @@ pub unsafe fn read_u8(port: u16) -> u8 {
             "in al, dx",
             in("dx") port,
             out("al") value,
-            options(nomem, nostack, preserves_flags),
+            options(nostack, preserves_flags),
         );
     }
     value
@@ -62,7 +62,7 @@ pub unsafe fn write_u8(port: u16, value: u8) {
             "out dx, al",
             in("dx") port,
             in("al") value,
-            options(nomem, nostack, preserves_flags),
+            options(nostack, preserves_flags),
         );
     }
 }

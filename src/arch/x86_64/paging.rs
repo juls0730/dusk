@@ -3,7 +3,8 @@ use core::arch::asm;
 use crate::{
     arch::x86_64::cpu::CpuFeatures,
     memory::{
-        DirectMap, FrameAllocator, PagePermissions, PhysicalAddr, PhysicalFrame, VirtualAddr,
+        CachePolicy, DirectMap, FrameAddr, FrameAllocator, OwnedFrame, PagePermissions,
+        PhysicalAddr, VirtualAddr,
     },
 };
 
@@ -22,7 +23,11 @@ impl PagingConfig {
         Self {
             physical_address_bits: features.physical_address_bits,
             nx_enabled: features.nx_enabled,
-            mode: PagingMode::FourLevel,
+            mode: if features.five_level_paging_active {
+                PagingMode::FiveLevel
+            } else {
+                PagingMode::FourLevel
+            },
         }
     }
 
@@ -41,11 +46,60 @@ enum PagingMode {
     FiveLevel,
 }
 
+const MAX_INTERMEDIATE_LEVELS: usize = 4;
+const FOUR_LEVEL_INTERMEDIATES: [PageTableLevel; 3] = [
+    PageTableLevel::Pml4,
+    PageTableLevel::Pdpt,
+    PageTableLevel::PageDirectory,
+];
+const FIVE_LEVEL_INTERMEDIATES: [PageTableLevel; 4] = [
+    PageTableLevel::Pml5,
+    PageTableLevel::Pml4,
+    PageTableLevel::Pdpt,
+    PageTableLevel::PageDirectory,
+];
+
 impl PagingMode {
     const fn virtual_address_bits(&self) -> u32 {
         match self {
             PagingMode::FourLevel => 48,
             PagingMode::FiveLevel => 57,
+        }
+    }
+
+    fn intermediate_levels(&self) -> &'static [PageTableLevel] {
+        match self {
+            PagingMode::FourLevel => &FOUR_LEVEL_INTERMEDIATES,
+            PagingMode::FiveLevel => &FIVE_LEVEL_INTERMEDIATES,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageTableLevel {
+    Pml5,
+    Pml4,
+    Pdpt,
+    PageDirectory,
+}
+
+impl PageTableLevel {
+    const fn index(self, address: usize) -> usize {
+        let shift = match self {
+            Self::Pml5 => 48,
+            Self::Pml4 => 39,
+            Self::Pdpt => 30,
+            Self::PageDirectory => 21,
+        };
+
+        address >> shift & 0x1FF
+    }
+
+    const fn large_page_size(self) -> Option<usize> {
+        match self {
+            Self::Pdpt => Some(1 << 30),
+            Self::PageDirectory => Some(1 << 21),
+            Self::Pml5 | Self::Pml4 => None,
         }
     }
 }
@@ -67,9 +121,14 @@ impl PageTableEntry {
     const HUGE_PAGE: u64 = 1 << 7;
     const NX: u64 = 1 << 63;
 
+    const WRITE_THROUGH: u64 = 1 << 3;
+    const CACHE_DISABLED: u64 = 1 << 4;
+    const PAT: u64 = 1 << 7;
+
     const fn new(
         physical_address: PhysicalAddr,
         permissions: PagePermissions,
+        cache_policy: CachePolicy,
         config: PagingConfig,
     ) -> Result<Self, PageTableEntryError> {
         if physical_address.as_usize() >= config.physical_address_limit() {
@@ -92,11 +151,20 @@ impl PageTableEntry {
             value |= Self::NX;
         }
 
+        // TODO: these bit positions very by page size
+        // set PAT
+        match cache_policy {
+            CachePolicy::WriteBack => {}
+            CachePolicy::Uncacheable => {
+                value |= Self::CACHE_DISABLED | Self::WRITE_THROUGH;
+            }
+        };
+
         Ok(Self(value))
     }
 
     fn new_table(
-        frame: PhysicalFrame,
+        frame: FrameAddr,
         user_accessible: bool,
         config: PagingConfig,
     ) -> Result<Self, PageTableEntryError> {
@@ -132,12 +200,20 @@ impl PageTableEntry {
         self.0 & Self::HUGE_PAGE != 0
     }
 
-    fn frame(&self, config: PagingConfig) -> Option<PhysicalFrame> {
+    fn table_frame(&self, config: PagingConfig) -> Option<FrameAddr> {
         if !self.is_present() || self.is_huge() {
             return None;
         }
 
-        PhysicalFrame::from_start_address(self.physical_address(config))
+        FrameAddr::from_start_address(self.physical_address(config))
+    }
+
+    fn leaf_frame(&self, config: PagingConfig) -> Option<FrameAddr> {
+        if !self.is_present() {
+            return None;
+        }
+
+        FrameAddr::from_start_address(self.physical_address(config))
     }
 }
 
@@ -165,10 +241,9 @@ pub(crate) enum UnmapError {
 }
 
 #[derive(Clone, Copy)]
-struct NewTable {
-    parent: PhysicalFrame,
+struct EntryLocation {
+    table: FrameAddr,
     index: usize,
-    child: PhysicalFrame,
 }
 
 #[derive(Debug)]
@@ -178,8 +253,8 @@ pub(crate) enum PageTableCreateError {
 }
 
 pub struct PageTable {
-    frame: PhysicalFrame,
-    direct_map: DirectMap,
+    pub direct_map: DirectMap,
+    frame: OwnedFrame,
     config: PagingConfig,
 }
 
@@ -191,7 +266,7 @@ impl PageTable {
     ) -> Result<Self, PageTableCreateError> {
         let frame = allocator.alloc().ok_or(PageTableCreateError::OutOfFrames)?;
 
-        if frame.start_address().as_usize() >= config.physical_address_limit() {
+        if frame.frame_address().start_address().as_usize() >= config.physical_address_limit() {
             unsafe { allocator.dealloc(frame) };
 
             return Err(PageTableCreateError::PhysicalAddressTooLarge);
@@ -207,19 +282,16 @@ impl PageTable {
     fn is_active(&self) -> bool {
         let cr3 = unsafe { read_cr3(self.config) };
 
-        cr3.start_address() == self.frame.start_address()
+        cr3.start_address() == self.frame.frame_address().start_address()
     }
 
-    fn table(&self, frame: PhysicalFrame) -> Option<&[PageTableEntry; PAGE_TABLE_ENTRIES]> {
+    fn table(&self, frame: FrameAddr) -> Option<&[PageTableEntry; PAGE_TABLE_ENTRIES]> {
         let virtual_addr = self.direct_map.translate(frame.start_address())?;
 
         Some(unsafe { &*(virtual_addr.as_ptr::<[PageTableEntry; PAGE_TABLE_ENTRIES]>()) })
     }
 
-    fn table_mut(
-        &mut self,
-        frame: PhysicalFrame,
-    ) -> Option<&mut [PageTableEntry; PAGE_TABLE_ENTRIES]> {
+    fn table_mut(&mut self, frame: FrameAddr) -> Option<&mut [PageTableEntry; PAGE_TABLE_ENTRIES]> {
         let virtual_addr = self.direct_map.translate(frame.start_address())?;
 
         Some(unsafe { &mut *(virtual_addr.as_mut_ptr::<[PageTableEntry; PAGE_TABLE_ENTRIES]>()) })
@@ -232,228 +304,263 @@ impl PageTable {
         (((addr << shift) as isize >> shift) as usize) == addr
     }
 
-    pub fn translate(&self, addr: VirtualAddr) -> Option<PhysicalAddr> {
-        let addr = addr.as_usize();
+    pub fn to_physical(&self, addr: VirtualAddr) -> Option<PhysicalAddr> {
+        let address = addr.as_usize();
 
-        if !self.is_canonical(addr) {
+        if !self.is_canonical(address) {
             return None;
         }
 
-        let p4 = self.table(self.frame)?;
-        let p4_entry = p4[p4_index(addr)];
+        let mut table_frame = self.frame.frame_address();
 
-        if !p4_entry.is_present() {
-            return None;
+        for &level in self.config.mode.intermediate_levels() {
+            let table = self.table(table_frame)?;
+            let entry = table[level.index(address)];
+
+            if !entry.is_present() {
+                return None;
+            }
+
+            if entry.is_huge() {
+                return translate_huge_page(entry, address, level.large_page_size()?, self.config);
+            }
+
+            table_frame = entry.table_frame(self.config)?;
         }
 
-        let p3 = self.table(p4_entry.frame(self.config)?)?;
-        let p3_entry = p3[p3_index(addr)];
-
-        if !p3_entry.is_present() {
-            return None;
-        }
-
-        if p3_entry.is_huge() {
-            return translate_huge_page(p3_entry, addr, 1 << 30, self.config);
-        }
-
-        let p2 = self.table(p3_entry.frame(self.config)?)?;
-        let p2_entry = p2[p2_index(addr)];
-
-        if !p2_entry.is_present() {
-            return None;
-        }
-
-        if p2_entry.is_huge() {
-            return translate_huge_page(p2_entry, addr, 1 << 21, self.config);
-        }
-
-        let p1 = self.table(p2_entry.frame(self.config)?)?;
-        let p1_entry = p1[p1_index(addr)];
-
-        if !p1_entry.is_present() {
-            return None;
-        }
-
-        let physical_base = p1_entry.physical_address(self.config).as_usize();
+        let page_table = self.table(table_frame)?;
+        let entry = page_table[p1_index(address)];
+        let physical_base = entry.leaf_frame(self.config)?.start_address().as_usize();
 
         physical_base
-            .checked_add(page_offset(addr))
+            .checked_add(page_offset(address))
             .map(PhysicalAddr::new)
+    }
+
+    pub fn to_virtual(&self, addr: PhysicalAddr) -> Option<VirtualAddr> {
+        self.direct_map.translate(addr)
     }
 
     fn get_next_level(
         &self,
-        parent: PhysicalFrame,
+        parent: FrameAddr,
         index: usize,
-    ) -> Result<PhysicalFrame, UnmapError> {
+        level: PageTableLevel,
+    ) -> Result<FrameAddr, UnmapError> {
         let parent_table = self
             .table(parent)
             .ok_or(UnmapError::PageTableOutsideDirectMap)?;
-
-        // TODO: encode the level so bit 7 is only interpreted where huge pages are valid.
-        if parent_table[index].is_huge() {
-            return Err(UnmapError::HugePageConflict);
-        }
-
-        parent_table[index]
-            .frame(self.config)
-            .ok_or(UnmapError::PageNotMapped)
-    }
-
-    fn get_next_level_or_allocate(
-        &mut self,
-        parent: PhysicalFrame,
-        index: usize,
-        user_accessible: bool,
-        allocator: &mut FrameAllocator,
-    ) -> Result<(PhysicalFrame, bool), MapError> {
-        let config = self.config;
-
-        let parent_table = self
-            .table_mut(parent)
-            .ok_or(MapError::PageTableOutsideDirectMap)?;
-
-        let entry = &mut parent_table[index];
-
-        if !entry.is_present() {
-            let frame = allocator.alloc().ok_or(MapError::OutOfFrames)?;
-            let table = match PageTableEntry::new_table(frame, user_accessible, config) {
-                Ok(table) => table,
-                Err(PageTableEntryError::PhysicalAddressTooLarge) => {
-                    unsafe { allocator.dealloc(frame) };
-                    return Err(MapError::PhysicalAddressTooLarge);
-                }
-                Err(PageTableEntryError::NoExecuteUnsupported) => unreachable!(),
-            };
-            *entry = table;
-            return Ok((frame, true));
-        }
+        let entry = parent_table[index];
 
         if entry.is_huge() {
-            return Err(MapError::HugePageConflict);
-        }
-
-        // TODO: we upgrade intermediate entries, and dont carefully rollback if we fail
-        if user_accessible && !entry.is_user_accessible() {
-            entry.0 |= PageTableEntry::USER_ACCESSIBLE;
+            return if level.large_page_size().is_some() {
+                Err(UnmapError::HugePageConflict)
+            } else {
+                Err(UnmapError::InvalidPageTableEntry)
+            };
         }
 
         entry
-            .frame(config)
-            .map(|frame| (frame, false))
-            .ok_or(MapError::InvalidPageTableEntry)
+            .table_frame(self.config)
+            .ok_or(UnmapError::PageNotMapped)
     }
 
-    fn rollback_tables(
-        &mut self,
-        new_tables: &[Option<NewTable>],
+    fn discard_private_tables(
+        frames: &mut [Option<OwnedFrame>; MAX_INTERMEDIATE_LEVELS],
         count: usize,
         allocator: &mut FrameAllocator,
     ) {
-        for table in new_tables[..count].iter().rev().flatten() {
-            self.table_mut(table.parent).unwrap()[table.index] = PageTableEntry::null();
+        for frame in frames[..count].iter_mut().rev().filter_map(Option::take) {
+            unsafe { allocator.dealloc(frame) };
+        }
+    }
 
-            unsafe { allocator.dealloc(table.child) };
+    fn apply_user_upgrades(
+        &mut self,
+        upgrades: &[Option<EntryLocation>; MAX_INTERMEDIATE_LEVELS],
+        count: usize,
+    ) {
+        for location in upgrades[..count].iter().flatten() {
+            let entry = &mut self
+                .table_mut(location.table)
+                .expect("validated page table left the direct map")[location.index];
+            entry.0 |= PageTableEntry::USER_ACCESSIBLE;
         }
     }
 
     pub fn map(
         &mut self,
         mapped_addr: VirtualAddr,
-        frame: PhysicalFrame,
+        frame: FrameAddr,
         permissions: PagePermissions,
         allocator: &mut FrameAllocator,
+        cache_policy: CachePolicy,
     ) -> Result<(), MapError> {
-        if !self.is_canonical(mapped_addr.as_usize()) {
+        let address = mapped_addr.as_usize();
+
+        if !self.is_canonical(address) {
             return Err(MapError::InvalidVirtualAddress);
         }
 
-        if mapped_addr.as_usize() % PAGE_SIZE != 0 {
+        if address % PAGE_SIZE != 0 {
             return Err(MapError::VirtualAddressUnaligned);
         }
 
-        if frame.start_address().as_usize() >= self.config.physical_address_limit() {
-            return Err(MapError::PhysicalAddressTooLarge);
+        let leaf_entry = PageTableEntry::new(
+            frame.start_address(),
+            permissions,
+            cache_policy,
+            self.config,
+        )
+        .map_err(|error| match error {
+            PageTableEntryError::PhysicalAddressTooLarge => MapError::PhysicalAddressTooLarge,
+            PageTableEntryError::NoExecuteUnsupported => MapError::NoExecuteUnsupported,
+        })?;
+
+        let levels = self.config.mode.intermediate_levels();
+        let mut current_table_frame_addr = self.frame.frame_address();
+        let mut first_missing = None;
+        let mut user_upgrades: [Option<EntryLocation>; MAX_INTERMEDIATE_LEVELS] =
+            [None; MAX_INTERMEDIATE_LEVELS];
+        let mut user_upgrade_count = 0;
+
+        for (depth, &level) in levels.iter().enumerate() {
+            let index = level.index(address);
+            let table = self
+                .table(current_table_frame_addr)
+                .ok_or(MapError::PageTableOutsideDirectMap)?;
+            let entry = table[index];
+
+            if !entry.is_present() {
+                first_missing = Some((
+                    depth,
+                    EntryLocation {
+                        table: current_table_frame_addr,
+                        index,
+                    },
+                ));
+                break;
+            }
+
+            if entry.is_huge() {
+                return if level.large_page_size().is_some() {
+                    Err(MapError::HugePageConflict)
+                } else {
+                    Err(MapError::InvalidPageTableEntry)
+                };
+            }
+
+            if permissions.user_accessible && !entry.is_user_accessible() {
+                user_upgrades[user_upgrade_count] = Some(EntryLocation {
+                    table: current_table_frame_addr,
+                    index,
+                });
+                user_upgrade_count += 1;
+            }
+
+            current_table_frame_addr = entry
+                .table_frame(self.config)
+                .ok_or(MapError::InvalidPageTableEntry)?;
         }
 
-        let mut new_tables: [Option<NewTable>; 3] = [None; 3];
-        let mut new_table_count = 0;
-
-        let result = (|| {
-            let p4_entry_index = p4_index(mapped_addr.as_usize());
-            let (pdpt_frame, allocated) = self.get_next_level_or_allocate(
-                self.frame,
-                p4_entry_index,
-                permissions.user_accessible,
-                allocator,
-            )?;
-            if allocated {
-                new_tables[new_table_count] = Some(NewTable {
-                    parent: self.frame,
-                    index: p4_entry_index,
-                    child: pdpt_frame,
-                });
-                new_table_count += 1;
-            }
-
-            let p3_entry_index = p3_index(mapped_addr.as_usize());
-            let (pd_frame, allocated) = self.get_next_level_or_allocate(
-                pdpt_frame,
-                p3_entry_index,
-                permissions.user_accessible,
-                allocator,
-            )?;
-            if allocated {
-                new_tables[new_table_count] = Some(NewTable {
-                    parent: pdpt_frame,
-                    index: p3_entry_index,
-                    child: pd_frame,
-                });
-                new_table_count += 1;
-            }
-
-            let p2_entry_index = p2_index(mapped_addr.as_usize());
-            let (pt_frame, allocated) = self.get_next_level_or_allocate(
-                pd_frame,
-                p2_entry_index,
-                permissions.user_accessible,
-                allocator,
-            )?;
-            if allocated {
-                new_tables[new_table_count] = Some(NewTable {
-                    parent: pd_frame,
-                    index: p2_entry_index,
-                    child: pt_frame,
-                });
-                new_table_count += 1;
-            }
-
-            let config = self.config.clone();
-
-            let pt_table = self
-                .table_mut(pt_frame)
+        if first_missing.is_none() {
+            let pt = self
+                .table(current_table_frame_addr)
                 .ok_or(MapError::PageTableOutsideDirectMap)?;
-            let entry = &mut pt_table[p1_index(mapped_addr.as_usize())];
-            if entry.is_present() {
+            if pt[p1_index(address)].is_present() {
                 return Err(MapError::PageAlreadyMapped);
             }
 
-            *entry =
-                PageTableEntry::new(frame.start_address(), permissions, config).map_err(|err| {
-                    match err {
-                        PageTableEntryError::PhysicalAddressTooLarge => {
-                            MapError::PhysicalAddressTooLarge
-                        }
-                        PageTableEntryError::NoExecuteUnsupported => MapError::NoExecuteUnsupported,
-                    }
-                })?;
-            Ok(())
+            self.apply_user_upgrades(&user_upgrades, user_upgrade_count);
+            self.table_mut(current_table_frame_addr)
+                .expect("validated page table left the direct map")[p1_index(address)] = leaf_entry;
+            self.flush_tlb_if_active(mapped_addr);
+            return Ok(());
+        }
+
+        let (missing_depth, publication_location) = first_missing.unwrap();
+        let private_table_count = levels.len() - missing_depth;
+        let mut private_tables: [Option<OwnedFrame>; MAX_INTERMEDIATE_LEVELS] =
+            core::array::from_fn(|_| None);
+        let mut allocated_count = 0;
+
+        while allocated_count < private_table_count {
+            let private_frame = match allocator.alloc() {
+                Some(frame) => frame,
+                None => {
+                    Self::discard_private_tables(&mut private_tables, allocated_count, allocator);
+                    return Err(MapError::OutOfFrames);
+                }
+            };
+
+            if PageTableEntry::new_table(
+                private_frame.frame_address(),
+                permissions.user_accessible,
+                self.config,
+            )
+            .is_err()
+            {
+                unsafe { allocator.dealloc(private_frame) };
+                Self::discard_private_tables(&mut private_tables, allocated_count, allocator);
+                return Err(MapError::PhysicalAddressTooLarge);
+            }
+
+            private_tables[allocated_count] = Some(private_frame);
+            allocated_count += 1;
+        }
+
+        let prepare_result = (|| {
+            for private_index in 0..private_table_count {
+                let private_frame = private_tables[private_index]
+                    .as_ref()
+                    .unwrap()
+                    .frame_address();
+
+                if private_index + 1 < private_table_count {
+                    let child = private_tables[private_index + 1]
+                        .as_ref()
+                        .unwrap()
+                        .frame_address();
+                    let child_entry =
+                        PageTableEntry::new_table(child, permissions.user_accessible, self.config)
+                            .map_err(|_| MapError::PhysicalAddressTooLarge)?;
+                    let child_index = levels[missing_depth + private_index + 1].index(address);
+                    self.table_mut(private_frame)
+                        .ok_or(MapError::PageTableOutsideDirectMap)?[child_index] = child_entry;
+                } else {
+                    self.table_mut(private_frame)
+                        .ok_or(MapError::PageTableOutsideDirectMap)?[p1_index(address)] =
+                        leaf_entry;
+                }
+            }
+
+            PageTableEntry::new_table(
+                private_tables[0].as_ref().unwrap().frame_address(),
+                permissions.user_accessible,
+                self.config,
+            )
+            .map_err(|_| MapError::PhysicalAddressTooLarge)
         })();
 
-        if result.is_err() {
-            self.rollback_tables(&new_tables, new_table_count, allocator);
-            return result;
+        let publication_entry = match prepare_result {
+            Ok(entry) => entry,
+            Err(error) => {
+                Self::discard_private_tables(&mut private_tables, allocated_count, allocator);
+                return Err(error);
+            }
+        };
+
+        self.apply_user_upgrades(&user_upgrades, user_upgrade_count);
+        self.table_mut(publication_location.table)
+            .expect("validated publication table left the direct map")
+            [publication_location.index] = publication_entry;
+
+        // The published page table now owns these frames.
+        for frame in private_tables[..allocated_count]
+            .iter_mut()
+            .flat_map(Option::take)
+        {
+            let _ = frame.into_raw();
         }
 
         self.flush_tlb_if_active(mapped_addr);
@@ -470,7 +577,7 @@ impl PageTable {
         &mut self,
         mapped_addr: VirtualAddr,
         allocator: &mut FrameAllocator,
-    ) -> Result<PhysicalFrame, UnmapError> {
+    ) -> Result<FrameAddr, UnmapError> {
         if !self.is_canonical(mapped_addr.as_usize()) {
             return Err(UnmapError::InvalidVirtualAddress);
         }
@@ -479,47 +586,60 @@ impl PageTable {
             return Err(UnmapError::VirtualAddressUnaligned);
         }
 
-        let config = self.config;
+        let address = mapped_addr.as_usize();
+        let levels = self.config.mode.intermediate_levels();
+        let mut table_frames: [Option<FrameAddr>; MAX_INTERMEDIATE_LEVELS + 1] =
+            core::array::from_fn(|_| None);
+        table_frames[0] = Some(self.frame.frame_address());
 
-        let pdpt_frame = self.get_next_level(self.frame, p4_index(mapped_addr.as_usize()))?;
-
-        let pd_frame = self.get_next_level(pdpt_frame, p3_index(mapped_addr.as_usize()))?;
-
-        let pt_frame = self.get_next_level(pd_frame, p2_index(mapped_addr.as_usize()))?;
-        let pt_table = self
-            .table_mut(pt_frame)
-            .ok_or(UnmapError::PageTableOutsideDirectMap)?;
-
-        let entry = pt_table[p1_index(mapped_addr.as_usize())];
-
-        if !entry.is_present() {
-            return Err(UnmapError::PageNotMapped);
+        let mut current_table = self.frame.frame_address();
+        for (depth, &level) in levels.iter().enumerate() {
+            current_table = self.get_next_level(current_table, level.index(address), level)?;
+            table_frames[depth + 1] = Some(current_table);
         }
 
-        let frame = entry
-            .frame(config)
-            .ok_or(UnmapError::InvalidPageTableEntry)?;
-        pt_table[p1_index(mapped_addr.as_usize())] = PageTableEntry::null();
+        let config = self.config;
+        let page_table = self
+            .table_mut(current_table)
+            .ok_or(UnmapError::PageTableOutsideDirectMap)?;
+        let entry_index = p1_index(address);
+        let entry = page_table[entry_index];
+        let frame = entry.leaf_frame(config).ok_or(UnmapError::PageNotMapped)?;
+        page_table[entry_index] = PageTableEntry::null();
 
-        if pt_table.is_empty() {
-            self.table_mut(pd_frame).unwrap()[p2_index(mapped_addr.as_usize())] =
+        let mut child_is_empty = page_table.iter().all(|entry| !entry.is_present());
+        let mut deallocatable_frames: [Option<FrameAddr>; MAX_INTERMEDIATE_LEVELS] =
+            core::array::from_fn(|_| None);
+        let mut deallocatable_count = 0;
+
+        for depth in (0..levels.len()).rev() {
+            if !child_is_empty {
+                break;
+            }
+
+            let parent_frame_addr = table_frames[depth].unwrap();
+            let child_frame = table_frames[depth + 1].unwrap();
+            self.table_mut(parent_frame_addr)
+                .expect("validated page table left the direct map")[levels[depth].index(address)] =
                 PageTableEntry::null();
-            unsafe { allocator.dealloc(pt_frame) };
 
-            if self.table(pd_frame).unwrap().is_empty() {
-                self.table_mut(pdpt_frame).unwrap()[p3_index(mapped_addr.as_usize())] =
-                    PageTableEntry::null();
-                unsafe { allocator.dealloc(pd_frame) };
+            deallocatable_frames[deallocatable_count] = Some(child_frame);
+            deallocatable_count += 1;
 
-                if self.table(pdpt_frame).unwrap().is_empty() {
-                    self.table_mut(self.frame).unwrap()[p4_index(mapped_addr.as_usize())] =
-                        PageTableEntry::null();
-                    unsafe { allocator.dealloc(pdpt_frame) };
-                }
+            if depth > 0 {
+                child_is_empty = self
+                    .table(parent_frame_addr)
+                    .expect("validated page table left the direct map")
+                    .iter()
+                    .all(|entry| !entry.is_present());
             }
         }
 
         self.flush_tlb_if_active(mapped_addr);
+
+        for frame in deallocatable_frames[..deallocatable_count].iter().flatten() {
+            unsafe { allocator.dealloc(OwnedFrame::from_raw(*frame)) };
+        }
 
         Ok(frame)
     }
@@ -543,10 +663,44 @@ impl PageTable {
         unsafe {
             asm!(
                 "mov cr3, {}",
-                in(reg) self.frame.start_address().as_usize(),
+                in(reg) self.frame.frame_address().start_address().as_usize(),
                 options(nostack, preserves_flags)
             );
         };
+    }
+
+    fn destroy_children(&mut self, table: FrameAddr, depth: usize, allocator: &mut FrameAllocator) {
+        let levels = self.config.mode.intermediate_levels();
+
+        if depth == levels.len() {
+            return;
+        }
+
+        for idx in 0..PAGE_TABLE_ENTRIES {
+            let entry = self.table(table).expect("page table outside direct map")[idx];
+
+            if !entry.is_present() || entry.is_huge() {
+                continue;
+            }
+
+            let child = entry
+                .table_frame(self.config)
+                .expect("invalid page table entry");
+            self.destroy_children(child, depth + 1, allocator);
+
+            self.table_mut(table)
+                .expect("page table outside direct map")[idx] = PageTableEntry::null();
+
+            unsafe { allocator.dealloc(OwnedFrame::from_raw(child)) };
+        }
+    }
+
+    pub unsafe fn destroy(mut self, allocator: &mut FrameAllocator) {
+        assert!(!self.is_active(), "attempted to destroy active page table");
+
+        self.destroy_children(self.frame.frame_address(), 0, allocator);
+
+        unsafe { allocator.dealloc(self.frame) };
     }
 }
 
@@ -563,18 +717,6 @@ fn translate_huge_page(
     physical_base.checked_add(offset).map(PhysicalAddr::new)
 }
 
-fn p4_index(addr: usize) -> usize {
-    (addr >> 39) & 0x1FF
-}
-
-fn p3_index(addr: usize) -> usize {
-    (addr >> 30) & 0x1FF
-}
-
-fn p2_index(addr: usize) -> usize {
-    (addr >> 21) & 0x1FF
-}
-
 fn p1_index(addr: usize) -> usize {
     (addr >> 12) & 0x1FF
 }
@@ -583,7 +725,7 @@ fn page_offset(addr: usize) -> usize {
     addr & 0xFFF
 }
 
-unsafe fn read_cr3(config: PagingConfig) -> PhysicalFrame {
+unsafe fn read_cr3(config: PagingConfig) -> FrameAddr {
     let value: usize;
     unsafe {
         asm!(
@@ -593,6 +735,6 @@ unsafe fn read_cr3(config: PagingConfig) -> PhysicalFrame {
         );
     }
 
-    PhysicalFrame::from_start_address(PhysicalAddr::new(value & config.physical_address_mask()))
+    FrameAddr::from_start_address(PhysicalAddr::new(value & config.physical_address_mask()))
         .expect("CR3 contains an unaligned page-table address")
 }

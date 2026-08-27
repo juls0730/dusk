@@ -1,3 +1,3 @@
 mod limine;
 
-pub use limine::{BootError, BootInfo, load_boot_info};
+pub use limine::{BootInfo, load_boot_info};

@@ -2,7 +2,7 @@ mod address_space;
 mod frame;
 
 pub use address_space::{AddressSpace, AddressSpaceCreateError, MapError, UnmapError};
-pub use frame::{FRAME_SIZE, FrameAllocator, PhysicalFrame};
+pub use frame::{FRAME_SIZE, FrameAddr, FrameAllocator, OwnedFrame};
 
 pub struct KernelSegment {
     pub physical_base: PhysicalAddr,
@@ -37,7 +37,7 @@ impl PagePermissions {
 pub struct PhysicalAddr(usize);
 
 impl PhysicalAddr {
-    pub fn new(addr: usize) -> Self {
+    pub const fn new(addr: usize) -> Self {
         Self(addr)
     }
 
@@ -51,7 +51,7 @@ impl PhysicalAddr {
 pub struct VirtualAddr(usize);
 
 impl VirtualAddr {
-    pub fn new(addr: usize) -> Self {
+    pub const fn new(addr: usize) -> Self {
         Self(addr)
     }
 
@@ -59,15 +59,16 @@ impl VirtualAddr {
         self.0 as usize
     }
 
-    pub unsafe fn as_mut_ptr<T>(self) -> *mut T {
+    pub const unsafe fn as_mut_ptr<T>(self) -> *mut T {
         self.as_usize() as *mut T
     }
 
-    pub unsafe fn as_ptr<T>(self) -> *const T {
+    pub const unsafe fn as_ptr<T>(self) -> *const T {
         self.as_usize() as *const T
     }
 }
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryRegionKind {
     Usable,
@@ -79,6 +80,12 @@ pub enum MemoryRegionKind {
     KernelAndModules,
     Framebuffer,
     MappedReserved,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CachePolicy {
+    Uncacheable,
+    WriteBack,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,5 +109,46 @@ impl DirectMap {
         addr.as_usize()
             .checked_add(self.offset)
             .map(VirtualAddr::new)
+    }
+}
+
+const EMPTY_MEMORY_REGION: MemoryRegion = MemoryRegion {
+    start: PhysicalAddr::new(0),
+    length: 0,
+    kind: MemoryRegionKind::Reserved,
+};
+const MAX_MEMORY_REGIONS: usize = 128;
+
+pub enum MemoryMapError {
+    TooManyRegions,
+}
+
+#[derive(Clone, Copy)]
+pub struct MemoryMap {
+    pub entries: [MemoryRegion; MAX_MEMORY_REGIONS],
+    pub len: usize,
+}
+
+impl MemoryMap {
+    pub const fn new() -> Self {
+        Self {
+            entries: [EMPTY_MEMORY_REGION; MAX_MEMORY_REGIONS],
+            len: 0,
+        }
+    }
+
+    pub fn push(&mut self, entry: MemoryRegion) -> Result<(), MemoryMapError> {
+        if self.len >= MAX_MEMORY_REGIONS {
+            return Err(MemoryMapError::TooManyRegions);
+        }
+
+        self.entries[self.len] = entry;
+        self.len += 1;
+
+        Ok(())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = MemoryRegion> + Clone + '_ {
+        self.entries[..self.len].iter().copied()
     }
 }

@@ -1,5 +1,8 @@
 use super::exceptions;
-use crate::{arch::x86_64::gdt::KERNEL_CODE_SELECTOR, memory::VirtualAddr};
+use crate::{
+    arch::x86_64::{gdt::KERNEL_CODE_SELECTOR, interrupts::apic_vectors},
+    memory::VirtualAddr,
+};
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -97,6 +100,7 @@ pub fn idt_init() {
     let mut idt = Idt::new();
 
     exceptions::install(&mut idt);
+    apic_vectors::install(&mut idt);
 
     unsafe {
         core::ptr::addr_of_mut!(IDT).write(idt);

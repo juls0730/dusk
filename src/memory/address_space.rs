@@ -1,9 +1,10 @@
 use crate::{
     arch::{PageTable, PageTableCreateError, PageTableMapError, PageTableUnmapError, PagingConfig},
     memory::{
-        DirectMap, FRAME_SIZE, FrameAllocator, KernelMemoryLayout, MemoryRegion, MemoryRegionKind,
-        PagePermissions, PhysicalAddr, PhysicalFrame, VirtualAddr,
+        CachePolicy, DirectMap, FRAME_SIZE, FrameAddr, FrameAllocator, KernelMemoryLayout,
+        MemoryRegion, MemoryRegionKind, PagePermissions, PhysicalAddr, VirtualAddr,
     },
+    println,
 };
 
 #[derive(Debug)]
@@ -105,11 +106,25 @@ impl AddressSpace {
 
         // map hhdm
         for region in memory_regions.clone() {
-            if region.kind == MemoryRegionKind::Reserved
-                || region.kind == MemoryRegionKind::BadMemory
-            {
+            // we exlcude KernelAndModules from the hhdm because if it were mapped, it would
+            // undermind the permissions of the explicitly mapped kernel image
+            if matches!(
+                region.kind,
+                MemoryRegionKind::Reserved
+                    | MemoryRegionKind::BadMemory
+                    | MemoryRegionKind::KernelAndModules
+            ) {
                 continue;
             }
+
+            let cache_policy = if matches!(
+                region.kind,
+                MemoryRegionKind::MappedReserved | MemoryRegionKind::Framebuffer
+            ) {
+                CachePolicy::Uncacheable
+            } else {
+                CachePolicy::WriteBack
+            };
 
             let res = space.map_range(
                 region.start,
@@ -117,16 +132,13 @@ impl AddressSpace {
                     .translate(region.start)
                     .ok_or(AddressSpaceCreateError::AddressOutsideDirectMap)?,
                 region.length,
-                PagePermissions {
-                    writable: true,
-                    executable: false,
-                    user_accessible: false,
-                },
+                PagePermissions::new(true, false, false),
                 allocator,
+                cache_policy,
             );
 
             if let Err(err) = res {
-                space.destroy(allocator);
+                unsafe { space.destroy(allocator) };
                 return Err(AddressSpaceCreateError::Map(err));
             }
         }
@@ -146,10 +158,11 @@ impl AddressSpace {
                 segment.length,
                 segment.permissions,
                 allocator,
+                CachePolicy::WriteBack,
             );
 
             if let Err(err) = res {
-                space.destroy(allocator);
+                unsafe { space.destroy(allocator) };
                 return Err(AddressSpaceCreateError::Map(err));
             }
         }
@@ -167,12 +180,13 @@ impl AddressSpace {
         virtual_addr: VirtualAddr,
         permissions: PagePermissions,
         allocator: &mut FrameAllocator,
+        cache_policy: CachePolicy,
     ) -> Result<(), MapError> {
-        let frame = PhysicalFrame::from_start_address(physical_addr)
+        let frame = FrameAddr::from_start_address(physical_addr)
             .ok_or(MapError::PhysicalAddressUnaligned)?;
 
         self.root
-            .map(virtual_addr, frame, permissions, allocator)
+            .map(virtual_addr, frame, permissions, allocator, cache_policy)
             .map_err(MapError::from)
     }
 
@@ -183,6 +197,7 @@ impl AddressSpace {
         length: usize,
         permissions: PagePermissions,
         allocator: &mut FrameAllocator,
+        cache_policy: CachePolicy,
     ) -> Result<(), MapError> {
         if length == 0 {
             return Ok(());
@@ -219,18 +234,25 @@ impl AddressSpace {
             let physical_addr = PhysicalAddr::new(physical_start.as_usize() + offset);
             let virtual_addr = VirtualAddr::new(virtual_start.as_usize() + offset);
 
-            if let Err(err) = self.map(physical_addr, virtual_addr, permissions, allocator) {
+            if let Err(err) = self.map(
+                physical_addr,
+                virtual_addr,
+                permissions,
+                allocator,
+                cache_policy,
+            ) {
                 for rollback_idx in (0..mapped_pages).rev() {
                     let rollback_offset = rollback_idx * FRAME_SIZE;
-                    let rollback_physical_addr =
-                        PhysicalAddr::new(physical_start.as_usize() + rollback_offset);
 
                     unsafe {
-                        self.unmap(
-                            VirtualAddr::new(virtual_start.as_usize() + rollback_offset),
-                            allocator,
-                        )
-                        .expect("failed to roll back a mapped page");
+                        // make sure we use the root page tableq directl since the public AddressSpace API
+                        // might *at some point* reject kernel mappings
+                        self.root
+                            .unmap(
+                                VirtualAddr::new(virtual_start.as_usize() + rollback_offset),
+                                allocator,
+                            )
+                            .expect("failed to roll back a mapped page");
                     }
                 }
 
@@ -246,24 +268,34 @@ impl AddressSpace {
     /// # Safety
     ///
     /// The caller must ensure:
-    /// - The caller must ensure that the page is not currently in use
+    /// - The page is not currently in use
     pub unsafe fn unmap(
         &mut self,
         virtual_addr: VirtualAddr,
         allocator: &mut FrameAllocator,
-    ) -> Result<PhysicalFrame, UnmapError> {
+    ) -> Result<FrameAddr, UnmapError> {
         unsafe { self.root.unmap(virtual_addr, allocator) }.map_err(UnmapError::from)
     }
 
-    pub fn translate(&self, virtual_addr: VirtualAddr) -> Option<PhysicalAddr> {
-        self.root.translate(virtual_addr)
+    pub fn to_physical(&self, virtual_addr: VirtualAddr) -> Option<PhysicalAddr> {
+        self.root.to_physical(virtual_addr)
+    }
+
+    pub fn to_virtual(&self, physical_addr: PhysicalAddr) -> Option<VirtualAddr> {
+        self.root.to_virtual(physical_addr)
     }
 
     pub unsafe fn activate(&self) {
         unsafe { self.root.activate() }
     }
 
-    pub fn destroy(self, allocator: &mut FrameAllocator) {
-        todo!("destroy address space")
+    /// # Safety
+    ///
+    /// The caller must ensure this apge table is not active on any CPU and
+    /// no CPU or kernel operation can access its paging structures.
+    pub unsafe fn destroy(self, allocator: &mut FrameAllocator) {
+        unsafe {
+            self.root.destroy(allocator);
+        }
     }
 }

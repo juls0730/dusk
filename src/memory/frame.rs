@@ -87,7 +87,7 @@ impl FrameAllocator {
         let mut highest_frame: Option<usize> = None;
 
         for region in regions.clone() {
-            if region.kind != MemoryRegionKind::Usable {
+            if !Self::should_track(region.kind) {
                 continue;
             }
 
@@ -110,7 +110,7 @@ impl FrameAllocator {
         let mut bitmap_start_frame: Option<usize> = None;
 
         for region in regions.clone() {
-            if region.kind != MemoryRegionKind::Usable {
+            if !Self::can_store_bitmap(region.kind) {
                 continue;
             }
 
@@ -152,7 +152,7 @@ impl FrameAllocator {
             .ok_or(FrameAllocatorInitError::AddressOverflow)?;
 
         for region in regions {
-            if region.kind != MemoryRegionKind::Usable {
+            if !Self::is_initially_free(region.kind) {
                 continue;
             }
 
@@ -178,6 +178,23 @@ impl FrameAllocator {
         })
     }
 
+    fn should_track(kind: MemoryRegionKind) -> bool {
+        matches!(
+            kind,
+            MemoryRegionKind::Usable
+                | MemoryRegionKind::BootloaderReclaimable
+                | MemoryRegionKind::AcpiReclaimable
+        )
+    }
+
+    fn can_store_bitmap(kind: MemoryRegionKind) -> bool {
+        kind == MemoryRegionKind::Usable
+    }
+
+    fn is_initially_free(kind: MemoryRegionKind) -> bool {
+        kind == MemoryRegionKind::Usable
+    }
+
     fn find_free_in(&self, start: usize, end: usize) -> Option<usize> {
         (start..end).find(|&index| self.bitmap.state(index) == FrameState::Free)
     }
@@ -187,7 +204,35 @@ impl FrameAllocator {
             .or_else(|| self.find_free_in(0, self.next_search))
     }
 
-    pub fn alloc_nozero(&mut self) -> Option<PhysicalFrame> {
+    pub fn reclaim_regions<I: Iterator<Item = MemoryRegion> + Clone>(
+        &mut self,
+        memory_map: I,
+        region_kind: MemoryRegionKind,
+    ) {
+        if !matches!(
+            region_kind,
+            MemoryRegionKind::BootloaderReclaimable | MemoryRegionKind::AcpiReclaimable
+        ) {
+            return;
+        }
+
+        for region in memory_map {
+            if region.kind == region_kind {
+                for frame_idx in Self::usable_frame_range(region).expect("invalid memory region") {
+                    if self.bitmap.state(frame_idx) != FrameState::Reserved {
+                        continue;
+                    }
+
+                    self.bitmap.set_state(frame_idx, FrameState::Free);
+                    self.allocatable_frames += 1;
+                    self.free_frames += 1;
+                    self.next_search = self.next_search.min(frame_idx);
+                }
+            }
+        }
+    }
+
+    pub fn alloc_nozero(&mut self) -> Option<OwnedFrame> {
         if self.free_frames == 0 {
             return None;
         }
@@ -198,15 +243,15 @@ impl FrameAllocator {
         self.free_frames -= 1;
         self.next_search = frame_idx.saturating_add(1);
 
-        Some(PhysicalFrame::from_index(frame_idx))
+        Some(OwnedFrame::new(FrameAddr::from_index(frame_idx)))
     }
 
-    pub fn alloc(&mut self) -> Option<PhysicalFrame> {
+    pub fn alloc(&mut self) -> Option<OwnedFrame> {
         let frame = self.alloc_nozero()?;
 
         let start = self
             .direct_map
-            .translate(frame.start_address())
+            .translate(frame.frame_address().start_address())
             .expect("frame is outside the direct map");
 
         unsafe {
@@ -222,7 +267,7 @@ impl FrameAllocator {
     /// - The frame is currently owned by the caller
     /// - it is not currently in use
     /// - it has not been freed
-    pub unsafe fn dealloc(&mut self, frame: PhysicalFrame) {
+    pub unsafe fn dealloc(&mut self, frame: OwnedFrame) {
         let frame_idx = frame.index();
 
         match self.bitmap.state(frame_idx) {
@@ -265,9 +310,9 @@ impl FrameAllocator {
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PhysicalFrame(PhysicalAddr);
+pub struct FrameAddr(PhysicalAddr);
 
-impl PhysicalFrame {
+impl FrameAddr {
     pub fn from_start_address(address: PhysicalAddr) -> Option<Self> {
         if address.as_usize() % FRAME_SIZE != 0 {
             return None;
@@ -286,5 +331,33 @@ impl PhysicalFrame {
 
     fn index(&self) -> usize {
         self.0.as_usize() / FRAME_SIZE
+    }
+}
+
+// specifically not Clone or Copy
+#[derive(Debug)]
+pub struct OwnedFrame {
+    frame: FrameAddr,
+}
+
+impl OwnedFrame {
+    fn new(frame: FrameAddr) -> Self {
+        Self { frame }
+    }
+
+    pub fn into_raw(self) -> FrameAddr {
+        self.frame
+    }
+
+    pub unsafe fn from_raw(frame: FrameAddr) -> Self {
+        Self { frame }
+    }
+
+    pub fn frame_address(&self) -> FrameAddr {
+        self.frame
+    }
+
+    pub fn index(&self) -> usize {
+        self.frame.index()
     }
 }

@@ -1,12 +1,14 @@
 use ::limine as limine_api;
+use limine::paging::PagingMode;
+use limine::request::{PagingModeRequest, RsdpRequest};
 
 use limine_api::request::{ExecutableAddressRequest, HhdmRequest, MemmapRequest};
 use limine_api::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 use crate::memory::{
-    KernelMemoryLayout, KernelSegment, PagePermissions, PhysicalAddr, VirtualAddr,
+    KernelMemoryLayout, KernelSegment, MemoryMap, MemoryRegion, MemoryRegionKind, PagePermissions,
+    PhysicalAddr, VirtualAddr,
 };
-use crate::println;
 
 /// Sets the base revision to the latest revision supported by the crate.
 /// See specification for further info.
@@ -27,6 +29,15 @@ static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static PAGING_REQUEST: PagingModeRequest =
+    PagingModeRequest::new(PagingMode::MAX, PagingMode::MAX, PagingMode::MIN);
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 
 /// Define the stand and end markers for Limine requests.
 #[used]
@@ -50,32 +61,13 @@ unsafe extern "C" {
 pub struct BootInfo {
     pub kernel_layout: KernelMemoryLayout,
     pub hhdm_offset: usize,
-    entries: &'static [&'static limine_api::memmap::Entry],
+    pub memory_map: MemoryMap,
+    pub rsdp: VirtualAddr,
 }
 
 impl BootInfo {
-    pub fn memory_regions(&self) -> impl Iterator<Item = crate::memory::MemoryRegion> + Clone + '_ {
-        use crate::memory::{MemoryRegion, MemoryRegionKind};
-        self.entries.iter().map(|&entry| MemoryRegion {
-            start: crate::memory::PhysicalAddr::new(entry.base as usize),
-            length: entry.length as usize,
-            kind: match entry.type_ {
-                limine_api::memmap::MEMMAP_USABLE => MemoryRegionKind::Usable,
-                limine_api::memmap::MEMMAP_RESERVED => MemoryRegionKind::Reserved,
-                limine_api::memmap::MEMMAP_ACPI_RECLAIMABLE => MemoryRegionKind::AcpiReclaimable,
-                limine_api::memmap::MEMMAP_ACPI_NVS => MemoryRegionKind::AcpiNvs,
-                limine_api::memmap::MEMMAP_BAD_MEMORY => MemoryRegionKind::BadMemory,
-                limine_api::memmap::MEMMAP_BOOTLOADER_RECLAIMABLE => {
-                    MemoryRegionKind::BootloaderReclaimable
-                }
-                limine_api::memmap::MEMMAP_EXECUTABLE_AND_MODULES => {
-                    MemoryRegionKind::KernelAndModules
-                }
-                limine_api::memmap::MEMMAP_FRAMEBUFFER => MemoryRegionKind::Framebuffer,
-                limine_api::memmap::MEMMAP_MAPPED_RESERVED => MemoryRegionKind::MappedReserved,
-                _ => MemoryRegionKind::Reserved,
-            },
-        })
+    pub fn memory_regions(&self) -> impl Iterator<Item = MemoryRegion> + Clone + '_ {
+        self.memory_map.iter()
     }
 }
 
@@ -85,7 +77,9 @@ pub enum BootError {
     FailedToGetKernelAddress,
     FailedToGetHHDMAddress,
     FailedToGetMemmap,
+    TooManyMemoryRegions,
     FailedToLocateKernel,
+    FailedToGetRsdp,
 }
 
 pub fn load_boot_info() -> Result<BootInfo, BootError> {
@@ -101,10 +95,40 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
         .ok_or(BootError::FailedToGetHHDMAddress)?
         .offset;
 
+    let rsdp = RSDP_REQUEST.response().ok_or(BootError::FailedToGetRsdp)?;
+
     let memmap = MEMMAP_REQUEST
         .response()
         .ok_or(BootError::FailedToGetMemmap)?
         .entries();
+
+    let mut memory_map = MemoryMap::new();
+    for entry in memmap.iter() {
+        memory_map
+            .push(MemoryRegion {
+                start: PhysicalAddr::new(entry.base as usize),
+                length: entry.length as usize,
+                kind: match entry.type_ {
+                    limine_api::memmap::MEMMAP_USABLE => MemoryRegionKind::Usable,
+                    limine_api::memmap::MEMMAP_RESERVED => MemoryRegionKind::Reserved,
+                    limine_api::memmap::MEMMAP_ACPI_RECLAIMABLE => {
+                        MemoryRegionKind::AcpiReclaimable
+                    }
+                    limine_api::memmap::MEMMAP_ACPI_NVS => MemoryRegionKind::AcpiNvs,
+                    limine_api::memmap::MEMMAP_BAD_MEMORY => MemoryRegionKind::BadMemory,
+                    limine_api::memmap::MEMMAP_BOOTLOADER_RECLAIMABLE => {
+                        MemoryRegionKind::BootloaderReclaimable
+                    }
+                    limine_api::memmap::MEMMAP_EXECUTABLE_AND_MODULES => {
+                        MemoryRegionKind::KernelAndModules
+                    }
+                    limine_api::memmap::MEMMAP_FRAMEBUFFER => MemoryRegionKind::Framebuffer,
+                    limine_api::memmap::MEMMAP_MAPPED_RESERVED => MemoryRegionKind::MappedReserved,
+                    _ => MemoryRegionKind::Reserved,
+                },
+            })
+            .map_err(|_| BootError::TooManyMemoryRegions)?;
+    }
 
     let mut segment_physical = kernel_address.physical_base as usize;
     let mut segment_virtual = core::ptr::addr_of!(__text_start) as usize;
@@ -164,6 +188,11 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
             kernel_length = Some(entry.length as usize);
             break;
         }
+
+        if kernel_length.is_none() {
+            return Err(BootError::FailedToLocateKernel);
+        }
+
         debug_assert_eq!(segment_length, kernel_length.unwrap());
     }
 
@@ -176,6 +205,7 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
             ],
         },
         hhdm_offset: hhdm_offset as usize,
-        entries: memmap,
+        memory_map,
+        rsdp: VirtualAddr::new(rsdp.address as usize),
     })
 }

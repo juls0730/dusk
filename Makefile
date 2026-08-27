@@ -16,6 +16,7 @@ EXPORT_SYMBOLS = true
 ISO_PATH = ${ARTIFACTS_PATH}/iso_root
 #INITRAMFS_PATH = ${ARTIFACTS_PATH}/initramfs
 IMAGE_PATH = ${ARTIFACTS_PATH}/${IMAGE_NAME}
+ESP_IMAGE = ${ARTIFACTS_PATH}/esp.img
 CARGO_OPTS = -Zjson-target-spec --target=src/arch/${ARCH}/${ARCH}-unknown-none.json
 QEMU_OPTS += -m ${MEMORY} -drive id=hd0,format=raw,file=${IMAGE_PATH}
 LIMINE_BOOT_VARIATION = X64
@@ -34,6 +35,10 @@ endif
 
 ifneq (${GDB},)
 	QEMU_OPTS += -s -S
+endif
+
+ifneq (${KVM},)
+	QEMU_OPTS += -accel kvm -cpu host
 endif
 
 ifneq (${UEFI},)
@@ -55,11 +60,10 @@ prepare-bin-files:
 		rm -f ${IMAGE_PATH}
 		rm -rf ${ARTIFACTS_PATH}/*
 
-		# Make bin/ bin/iso_root and bin/initramfs
+		# Make bin/ and bin/iso_root
 		mkdir -p ${ARTIFACTS_PATH}
 		mkdir -p ${ISO_PATH}
 		# mkdir -p ${INITRAMFS_PATH}
-		mkdir -p ${ARTIFACTS_PATH}/mnt
 run-scripts:
 		# Place the build ID into the binary so it can be read at runtime
 		@HASH=$$(md5sum ${KERNEL_FILE} | cut -c1-12) && \
@@ -72,8 +76,6 @@ copy-iso-files:
 		mkdir -p ${ISO_PATH}/boot/limine
 		mkdir -p ${ISO_PATH}/EFI/BOOT
 
-		mkdir -p ${ISO_PATH}/mnt
-
 		cp -v limine.conf limine/limine-bios.sys ${ISO_PATH}/boot/limine
 		cp -v limine/BOOT${LIMINE_BOOT_VARIATION}.EFI ${ISO_PATH}/EFI/BOOT/
 
@@ -81,8 +83,13 @@ copy-iso-files:
 		cp -v ${KERNEL_FILE} ${ISO_PATH}/boot
 		#cp -v ${ARTIFACTS_PATH}/initramfs.img ${ISO_PATH}/boot
 
-partition-iso: copy-iso-files
-		# Make empty ISO of 64M in size
+build-esp: copy-iso-files
+		# Create and populate formatted FAT image for ESP partition (130048 1K-blocks = ~127MiB)
+		mkfs.fat -F ${ESP_BITS} -C ${ESP_IMAGE} 130048
+		mcopy -s -i ${ESP_IMAGE} ${ISO_PATH}/* ::
+
+partition-iso:
+		# Make empty disk image
 		dd if=/dev/zero of=${IMAGE_PATH} bs=1M count=0 seek=${ISO_SIZE}
 ifneq (${UEFI},)
 	parted -s ${IMAGE_PATH} mklabel gpt
@@ -94,24 +101,16 @@ else
 	parted -s ${IMAGE_PATH} set 1 boot on
 endif
 
-		# Make ISO with 1 partition starting at sector 2048 that is 32768 sectors, or 16MiB, in size
-		# Then a second partition spanning the rest of the disk
+		# Make second partition spanning the rest of the disk
 		parted -s ${IMAGE_PATH} mkpart primary 262145s 100%
 
-build-iso: partition-iso 
+build-iso: partition-iso build-esp
+		# Splice ESP partition into sector 2048 of the disk image
+		dd if=${ESP_IMAGE} of=${IMAGE_PATH} bs=512 seek=2048 conv=notrunc
 ifeq (${UEFI},)
 	# install limine for legacy bios
 	./limine/limine bios-install ${IMAGE_PATH}
 endif
-
-		sudo losetup -Pf --show ${IMAGE_PATH} > loopback_dev
-		sudo mkfs.fat -F ${ESP_BITS} `cat loopback_dev`p1
-		sudo mount `cat loopback_dev`p1 ${ARTIFACTS_PATH}/mnt
-		sudo cp -r ${ISO_PATH}/* ${ARTIFACTS_PATH}/mnt
-		sync
-		sudo umount ${ARTIFACTS_PATH}/mnt
-		sudo losetup -d `cat loopback_dev`
-		rm loopback_dev
 
 compile-bootloader:
 	@if [ ! -f "limine/.version" ] || [ "$$(cat limine/.version)" != "${LIMINE_VERSION}" ]; then \
