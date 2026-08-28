@@ -46,11 +46,20 @@ fatal_with_error_code!(stack_segment_fault_handler, "STACK-SEGMENT FAULT");
 fatal_with_error_code!(general_protection_handler, "GENERAL PROTECTION FAULT");
 fatal_with_error_code!(alignment_check_handler, "ALIGNMENT CHECK");
 
+extern "x86-interrupt" fn user_test_exit_handler(frame: InterruptStackFrame) {
+    if frame.code_segment & 0b11 != 3 {
+        panic!("user_test_exit_handler called from kernel");
+    }
+
+    println!("User test exit");
+    hcf();
+}
+
 pub(super) fn install(idt: &mut idt::Idt) {
     idt.set_handler(0, divide_error_handler, 0);
     idt.set_handler(1, debug_handler, 0);
     idt.set_handler(2, non_maskable_interrupt_handler, 0);
-    idt.set_handler(3, breakpoint_handler, 0);
+    idt.set_user_handler(3, breakpoint_handler, 0);
     idt.set_handler(6, invalid_opcode_handler, 0);
     idt.set_handler(7, device_not_available_handler, 0);
     idt.set_error_code_handler(8, double_fault_handler, 1);
@@ -63,6 +72,8 @@ pub(super) fn install(idt: &mut idt::Idt) {
     idt.set_error_code_handler(17, alignment_check_handler, 0);
     idt.set_handler(18, machine_check_handler, 0);
     idt.set_handler(19, simd_floating_point_handler, 0);
+
+    idt.set_user_handler(0x80, user_test_exit_handler, 0);
 }
 
 fn read_cr2() -> u64 {

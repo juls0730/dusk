@@ -11,85 +11,10 @@ mod platform;
 
 use crate::{
     debug::serial,
-    memory::{AddressSpace, MemoryRegionKind, VirtualAddr},
+    memory::{
+        AddressSpace, KernelStack, MemoryRegionKind, PagePermissions, UserStack, VirtualAddr,
+    },
 };
-
-#[derive(Debug)]
-#[allow(unused)]
-enum KernelStackCreateError {
-    AddressOverflow,
-    OutOfFrames,
-    GuardPageMapped,
-    Map(memory::MapError),
-}
-
-struct KernelStack {
-    start: memory::VirtualAddr,
-    pages: usize,
-}
-
-const BOOTSTRAP_STACK_TOP: usize = 0xFFFF_FFFE_0000_0000;
-const KERNEL_STACK_SIZE: usize = 64 * 1024;
-const KERNEL_STACK_GUARD_SIZE: usize = memory::FRAME_SIZE;
-
-const BOOTSTRAP_STACK_START: usize = BOOTSTRAP_STACK_TOP - KERNEL_STACK_SIZE;
-const BOOTSTRAP_STACK_GUARD: usize = BOOTSTRAP_STACK_START - KERNEL_STACK_GUARD_SIZE;
-
-impl KernelStack {
-    fn allocate(
-        address_space: &mut AddressSpace,
-        allocator: &mut memory::FrameAllocator,
-    ) -> Result<Self, KernelStackCreateError> {
-        let kernel_stack_start = VirtualAddr::new(BOOTSTRAP_STACK_START);
-
-        let guard_page = VirtualAddr::new(BOOTSTRAP_STACK_GUARD);
-
-        if address_space.to_physical(guard_page).is_some() {
-            // guard page should be *unmapped* so we get a page fault if we try to access it
-            return Err(KernelStackCreateError::GuardPageMapped);
-        }
-
-        let mut i = 0;
-        // on error we will just leak the frames
-        // because like what are going to do if we recover them? Die happily without leaking frames? idgaf
-        while i < KERNEL_STACK_SIZE {
-            let frame = allocator
-                .alloc()
-                .ok_or(KernelStackCreateError::OutOfFrames)?;
-            address_space
-                .map(
-                    frame.frame_address().start_address(),
-                    VirtualAddr::new(
-                        kernel_stack_start
-                            .as_usize()
-                            .checked_add(i)
-                            .ok_or(KernelStackCreateError::AddressOverflow)?,
-                    ),
-                    memory::PagePermissions::new(true, false, false),
-                    allocator,
-                    memory::CachePolicy::WriteBack,
-                )
-                .map_err(|err| KernelStackCreateError::Map(err))?;
-            i += memory::FRAME_SIZE;
-        }
-
-        debug_assert!(address_space.to_physical(guard_page).is_none());
-
-        Ok(Self {
-            start: kernel_stack_start,
-            pages: i / memory::FRAME_SIZE,
-        })
-    }
-
-    pub fn top(&self) -> Result<VirtualAddr, KernelStackCreateError> {
-        Ok(VirtualAddr::new(
-            self.start
-                .as_usize()
-                .checked_add(self.pages * memory::FRAME_SIZE)
-                .ok_or(KernelStackCreateError::AddressOverflow)?,
-        ))
-    }
-}
 
 pub struct KernelHandoff {
     allocator: memory::FrameAllocator,
@@ -134,7 +59,7 @@ pub extern "C" fn _start() -> ! {
         .to_virtual(handoff_frame.frame_address().start_address())
         .expect("failed to map kernel handoff");
 
-    let bootstrap_stack_top = bootstrap_stack.top().unwrap();
+    let bootstrap_stack_top = bootstrap_stack.top();
     let handoff = KernelHandoff {
         allocator,
         address_space,
@@ -177,10 +102,7 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
         MemoryRegionKind::BootloaderReclaimable,
     );
 
-    println!(
-        "Initializing local ACPI... {:#X}",
-        boot_info.rsdp.as_usize()
-    );
+    println!("Initializing local ACPI...",);
 
     let acpi = platform::acpi::init(&boot_info, direct_map).expect("failed to initialize ACPI");
 
@@ -193,7 +115,45 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
         arch::init_interrupt_controller(&madt, &mut allocator, &mut address_space)
             .expect("failed to initialize interrupt controller");
 
-    println!("interrupt controller: {:?}", interrupt_controller);
+    let mut user_addr_space = address_space
+        .new_user(&mut allocator)
+        .expect("failed to create user address space");
+
+    let user_stack = UserStack::allocate(&mut user_addr_space, &mut allocator)
+        .expect("failed to allocate user stack");
+
+    let user_instruction_pointer = VirtualAddr::new(0x8000);
+    let user_code_page = allocator
+        .alloc()
+        .expect("failed to allocate user code page")
+        .frame_address();
+    user_addr_space
+        .map(
+            user_code_page.start_address(),
+            user_instruction_pointer,
+            PagePermissions::new(true, true, true),
+            &mut allocator,
+            memory::CachePolicy::WriteBack,
+        )
+        .expect("failed to map user code page");
+
+    unsafe {
+        user_addr_space.activate();
+
+        let user_code: [u8; 5] = [
+            0xCC, // INT3
+            0xCD, 0x80, // INT 0x80
+            0xEB, 0xFE, // JMP -2 (loop forever if exit returns)
+        ];
+
+        core::ptr::copy_nonoverlapping(
+            user_code.as_ptr(),
+            user_instruction_pointer.as_mut_ptr::<u8>(),
+            user_code.len(),
+        );
+
+        arch::enter_user(user_instruction_pointer, user_stack.top());
+    }
 
     hcf();
 }

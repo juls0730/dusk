@@ -1,13 +1,15 @@
 use core::arch::asm;
 
+use crate::memory::VirtualAddr;
+
 #[repr(C, align(8))]
 struct Gdt {
-    entries: [u64; 5],
+    entries: [u64; 7],
 }
 
 impl Gdt {
     pub const fn new() -> Self {
-        Self { entries: [0; 5] }
+        Self { entries: [0; 7] }
     }
 }
 
@@ -47,7 +49,9 @@ const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 
 pub(super) const KERNEL_CODE_SELECTOR: u16 = 1 * 8;
 pub(super) const KERNEL_DATA_SELECTOR: u16 = 2 * 8;
-pub(super) const TSS_SELECTOR: u16 = 3 * 8;
+pub(super) const USER_CODE_SELECTOR: u16 = (3 * 8) | 3;
+pub(super) const USER_DATA_SELECTOR: u16 = (4 * 8) | 3;
+pub(super) const TSS_SELECTOR: u16 = 5 * 8;
 
 #[repr(align(16))]
 #[allow(dead_code)] // field 0 is read, rust just cant tell
@@ -74,6 +78,8 @@ pub fn init() {
                 0,
                 kernel_code_descriptor(),
                 kernel_data_descriptor(),
+                user_code_descriptor(),
+                user_data_descriptor(),
                 tss_low,
                 tss_high,
             ],
@@ -81,6 +87,12 @@ pub fn init() {
         core::ptr::addr_of_mut!(GDT).write(gdt);
 
         gdt_reload();
+    }
+}
+
+pub fn set_kernel_stack(stack_top: VirtualAddr) {
+    unsafe {
+        TSS.privilege_stacks[0] = stack_top.as_usize() as u64;
     }
 }
 
@@ -119,17 +131,34 @@ fn gdt_reload() {
 }
 
 const PRESENT: u64 = 1 << 47;
-const USER_DESCRIPTOR: u64 = 1 << 44;
+const CODE_DATA_DESCRIPTOR: u64 = 1 << 44;
+const USER_PRIVILEGE: u64 = 3 << 45;
 const EXECUTABLE: u64 = 1 << 43;
 const READ_WRITE: u64 = 1 << 41;
+const GRANULARITY: u64 = 1 << 55;
+const SIZE: u64 = 1 << 54;
 const LONG_MODE: u64 = 1 << 53;
 
 fn kernel_code_descriptor() -> u64 {
-    PRESENT | USER_DESCRIPTOR | EXECUTABLE | READ_WRITE | LONG_MODE
+    PRESENT | CODE_DATA_DESCRIPTOR | EXECUTABLE | READ_WRITE | LONG_MODE | GRANULARITY
 }
 
 fn kernel_data_descriptor() -> u64 {
-    PRESENT | USER_DESCRIPTOR | READ_WRITE
+    PRESENT | CODE_DATA_DESCRIPTOR | READ_WRITE | SIZE | GRANULARITY
+}
+
+fn user_code_descriptor() -> u64 {
+    PRESENT
+        | CODE_DATA_DESCRIPTOR
+        | USER_PRIVILEGE
+        | EXECUTABLE
+        | READ_WRITE
+        | LONG_MODE
+        | GRANULARITY
+}
+
+fn user_data_descriptor() -> u64 {
+    PRESENT | CODE_DATA_DESCRIPTOR | USER_PRIVILEGE | READ_WRITE | SIZE | GRANULARITY
 }
 
 fn tss_descriptor(tss: *const TaskStateSegment) -> [u64; 2] {

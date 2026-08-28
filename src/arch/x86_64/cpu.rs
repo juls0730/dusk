@@ -11,6 +11,7 @@ pub enum CpuFeaturesError {
 pub(crate) struct CpuFeatures {
     pub nx_supported: bool,
     pub nx_enabled: bool,
+    pub global_pages: bool,
     pub physical_address_bits: u8,
     pub virtual_address_bits: u8,
     pub five_level_paging_active: bool,
@@ -23,22 +24,23 @@ pub fn detect_features_and_enable() -> Result<CpuFeatures, CpuFeaturesError> {
     let mut features = CpuFeatures {
         nx_supported: false,
         nx_enabled: false,
+        global_pages: false,
         physical_address_bits: 0,
         virtual_address_bits: 0,
         five_level_paging_active: false,
     };
 
-    let cpuid_result = core::arch::x86_64::__cpuid_count(0x80000000, 0);
+    let cpuid_result = core::arch::x86_64::__cpuid(0x80000000);
 
     if cpuid_result.eax < 0x80000008 {
         return Err(CpuFeaturesError::CpuidFeaturesNotSupported);
     }
 
-    let cpuid_result = core::arch::x86_64::__cpuid_count(0x80000001, 0);
+    let cpuid_result = core::arch::x86_64::__cpuid(0x80000001);
 
     features.nx_supported = cpuid_result.edx & (1 << 20) != 0;
 
-    let cpuid_result = core::arch::x86_64::__cpuid_count(0x80000008, 0);
+    let cpuid_result = core::arch::x86_64::__cpuid(0x80000008);
 
     features.physical_address_bits = (cpuid_result.eax & 0xFF) as u8;
     if !(12..=52).contains(&features.physical_address_bits) {
@@ -57,8 +59,16 @@ pub fn detect_features_and_enable() -> Result<CpuFeatures, CpuFeaturesError> {
         return Err(CpuFeaturesError::InvalidVirtualAddressWidth);
     }
 
+    let cpuid_result = core::arch::x86_64::__cpuid(0x1);
+
+    features.global_pages = cpuid_result.edx & (1 << 13) != 0;
+
+    if features.global_pages {
+        let cr4 = read_cr4();
+        write_cr4(cr4 | 1 << 7);
+    }
+
     if features.nx_supported {
-        let cpuid_result = core::arch::x86_64::__cpuid_count(0x1, 0);
         let msr_supported = cpuid_result.edx & (1 << 5) != 0;
 
         if !msr_supported {
@@ -76,6 +86,16 @@ pub fn detect_features_and_enable() -> Result<CpuFeatures, CpuFeaturesError> {
     }
 
     Ok(features)
+}
+
+fn write_cr4(value: usize) {
+    unsafe {
+        asm!(
+            "mov cr4, {}",
+            in(reg) value,
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 fn read_cr4() -> usize {

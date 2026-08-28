@@ -17,6 +17,7 @@ const MASKED: u32 = 1 << 16;
 pub const IOAPIC_VIRTUAL_ADDRESS: VirtualAddr = VirtualAddr::new(0xFFFF_FFFD_1000_0000);
 
 #[derive(Debug)]
+#[allow(unused)]
 pub enum IoApicError {
     IdMismatch { expected: u8, actual: u8 },
     GsiOutsideRange,
@@ -73,13 +74,6 @@ impl IoApic {
                 actual: id,
             });
         }
-        println!("IOAPIC ID: {:#X}", id);
-        println!("IOAPIC version: {:#X}", version & 0xFF);
-
-        println!(
-            "IOAPIC redirection entry count: {:#X}",
-            io_apic.redirection_entry_count
-        );
 
         Ok(io_apic)
     }

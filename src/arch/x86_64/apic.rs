@@ -127,14 +127,6 @@ impl LocalApic {
             return Err(LocalApicError::NotBootSystemProcessor);
         }
 
-        println!("BSP: {}", bsp);
-        println!("x2Apic: {}", x2apix);
-        println!("enabled: {}", enabled);
-        println!(
-            "xApic physical address: {:x}",
-            xapic_physical_addr.as_usize()
-        );
-
         let access = match x2apix {
             true => LocalApicAccess::X2Apic,
             false => {

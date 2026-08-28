@@ -14,6 +14,7 @@ pub const PAGE_TABLE_ENTRIES: usize = 512;
 #[derive(Clone, Copy, Debug)]
 pub struct PagingConfig {
     physical_address_bits: u8,
+    global_pages: bool,
     nx_enabled: bool,
     mode: PagingMode,
 }
@@ -23,6 +24,7 @@ impl PagingConfig {
         Self {
             physical_address_bits: features.physical_address_bits,
             nx_enabled: features.nx_enabled,
+            global_pages: features.global_pages,
             mode: if features.five_level_paging_active {
                 PagingMode::FiveLevel
             } else {
@@ -119,6 +121,7 @@ impl PageTableEntry {
     const WRITABLE: u64 = 1 << 1;
     const USER_ACCESSIBLE: u64 = 1 << 2;
     const HUGE_PAGE: u64 = 1 << 7;
+    const GLOBAL: u64 = 1 << 8;
     const NX: u64 = 1 << 63;
 
     const WRITE_THROUGH: u64 = 1 << 3;
@@ -130,6 +133,7 @@ impl PageTableEntry {
         permissions: PagePermissions,
         cache_policy: CachePolicy,
         config: PagingConfig,
+        global: bool,
     ) -> Result<Self, PageTableEntryError> {
         if physical_address.as_usize() >= config.physical_address_limit() {
             return Err(PageTableEntryError::PhysicalAddressTooLarge);
@@ -149,6 +153,10 @@ impl PageTableEntry {
             }
 
             value |= Self::NX;
+        }
+
+        if global && config.global_pages {
+            value |= Self::GLOBAL;
         }
 
         // TODO: these bit positions very by page size
@@ -198,6 +206,10 @@ impl PageTableEntry {
 
     fn is_huge(&self) -> bool {
         self.0 & Self::HUGE_PAGE != 0
+    }
+
+    fn is_global(&self) -> bool {
+        self.0 & Self::GLOBAL != 0
     }
 
     fn table_frame(&self, config: PagingConfig) -> Option<FrameAddr> {
@@ -254,8 +266,8 @@ pub(crate) enum PageTableCreateError {
 
 pub struct PageTable {
     pub direct_map: DirectMap,
-    frame: OwnedFrame,
     config: PagingConfig,
+    frame: OwnedFrame,
 }
 
 impl PageTable {
@@ -277,6 +289,10 @@ impl PageTable {
             direct_map,
             config,
         })
+    }
+
+    pub const fn config(&self) -> PagingConfig {
+        self.config
     }
 
     fn is_active(&self) -> bool {
@@ -395,6 +411,7 @@ impl PageTable {
         permissions: PagePermissions,
         allocator: &mut FrameAllocator,
         cache_policy: CachePolicy,
+        global: bool,
     ) -> Result<(), MapError> {
         let address = mapped_addr.as_usize();
 
@@ -411,6 +428,7 @@ impl PageTable {
             permissions,
             cache_policy,
             self.config,
+            global,
         )
         .map_err(|error| match error {
             PageTableEntryError::PhysicalAddressTooLarge => MapError::PhysicalAddressTooLarge,
@@ -644,6 +662,17 @@ impl PageTable {
         Ok(frame)
     }
 
+    pub fn copy_kernel_mappings_to(&self, destination: &mut PageTable) {
+        let src = self
+            .table(self.frame.frame_address())
+            .expect("source page table outside direct map");
+        let dest = destination
+            .table_mut(destination.frame.frame_address())
+            .expect("destination page table outside direct map");
+
+        dest[256..512].copy_from_slice(&src[256..512]);
+    }
+
     fn flush_tlb_if_active(&self, page: VirtualAddr) {
         debug_assert!(self.is_canonical(page.as_usize()));
 
@@ -699,6 +728,30 @@ impl PageTable {
         assert!(!self.is_active(), "attempted to destroy active page table");
 
         self.destroy_children(self.frame.frame_address(), 0, allocator);
+
+        unsafe { allocator.dealloc(self.frame) };
+    }
+
+    pub unsafe fn destroy_user(mut self, allocator: &mut FrameAllocator) {
+        assert!(!self.is_active(), "attempted to destroy active page table");
+
+        let root_frame = self.frame.frame_address();
+
+        for idx in 0..256 {
+            let entry = self.table(root_frame).expect("table outside direct map")[idx];
+            if !entry.is_present() || entry.is_huge() {
+                continue;
+            }
+
+            let child = entry
+                .table_frame(self.config)
+                .expect("invalid page table entry");
+            self.destroy_children(child, 1, allocator);
+
+            self.table_mut(root_frame)
+                .expect("table outside direct map")[idx] = PageTableEntry::null();
+            unsafe { allocator.dealloc(OwnedFrame::from_raw(child)) };
+        }
 
         unsafe { allocator.dealloc(self.frame) };
     }

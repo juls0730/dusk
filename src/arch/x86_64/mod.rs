@@ -46,6 +46,7 @@ pub fn init() -> ArchState {
 }
 
 #[derive(Debug)]
+#[allow(unused)]
 pub enum InterruptInitError {
     InvalidLocalApicId,
     InvalidLocalApicAddress,
@@ -162,6 +163,8 @@ pub fn init_interrupt_controller(
 /// - The stack is currently mapped, writable, and 16-byte aligned
 pub unsafe fn enter_kernel(stack_top: VirtualAddr, handoff: *mut KernelHandoff) -> ! {
     unsafe {
+        gdt::set_kernel_stack(stack_top);
+
         asm!(
             "mov rsp, {stack_top}",
             "xor rbp, rbp",
@@ -173,6 +176,38 @@ pub unsafe fn enter_kernel(stack_top: VirtualAddr, handoff: *mut KernelHandoff) 
             options(noreturn)
         );
     };
+}
+
+/// # Safety
+///
+/// - `user_instruction_pointer` and `user_stack_pointer` must be valid user mappings.
+/// - The active address space must contain the kernel and supplied user mappings.
+pub unsafe fn enter_user(
+    user_instruction_pointer: VirtualAddr,
+    user_stack_pointer: VirtualAddr,
+) -> ! {
+    println!("Entering user mode");
+
+    unsafe {
+        asm!(
+            "mov ds, {user_data_selector:x}",
+            "mov es, {user_data_selector:x}",
+            "mov fs, {user_data_selector:x}",
+            "mov gs, {user_data_selector:x}", // ss is handled by iretq
+
+            "push {user_data_selector}",
+            "push {user_stack_pointer}",
+            "pushfq",
+            "push {user_code_selector}",
+            "push {user_instruction_pointer}",
+            "iretq",
+            user_data_selector = in(reg) gdt::USER_DATA_SELECTOR as usize,
+            user_code_selector = in(reg) gdt::USER_CODE_SELECTOR as usize,
+            user_instruction_pointer = in(reg) user_instruction_pointer.as_usize(),
+            user_stack_pointer = in(reg) user_stack_pointer.as_usize(),
+            options(noreturn)
+        );
+    }
 }
 
 pub fn halt() {

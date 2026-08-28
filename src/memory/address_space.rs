@@ -20,6 +20,8 @@ pub enum MapError {
     OutOfMemory,
     PageTableUnavailable,
     CorruptedPageTable,
+    InvalidUserAddress,
+    InvalidUserMap,
 }
 
 impl From<PageTableMapError> for MapError {
@@ -46,6 +48,7 @@ pub enum UnmapError {
     MappingConflict,
     PageTableUnavailable,
     CorruptedPageTable,
+    InvalidUserAddress,
 }
 
 impl From<PageTableUnmapError> for UnmapError {
@@ -79,6 +82,7 @@ impl From<PageTableCreateError> for AddressSpaceCreateError {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum AddressSpaceKind {
     Kernel,
     User,
@@ -168,8 +172,15 @@ impl AddressSpace {
         Ok(space)
     }
 
-    pub fn new_user(kernel_space: &AddressSpace, allocator: &mut FrameAllocator) -> Self {
-        todo!()
+    pub fn new_user(&self, allocator: &mut FrameAllocator) -> Result<Self, PageTableCreateError> {
+        let mut user_root = PageTable::new(self.root.direct_map, self.root.config(), allocator)?;
+
+        self.root.copy_kernel_mappings_to(&mut user_root);
+
+        Ok(Self {
+            root: user_root,
+            kind: AddressSpaceKind::User,
+        })
     }
 
     pub fn map(
@@ -180,11 +191,33 @@ impl AddressSpace {
         allocator: &mut FrameAllocator,
         cache_policy: CachePolicy,
     ) -> Result<(), MapError> {
+        let global = self.kind == AddressSpaceKind::Kernel;
+
+        if self.kind == AddressSpaceKind::User {
+            if virtual_addr.as_usize() >= 0x0000_8000_0000_0000 {
+                return Err(MapError::InvalidUserAddress);
+            }
+
+            if !permissions.user_accessible {
+                return Err(MapError::InvalidUserMap);
+            }
+
+            // TODO: a user address space should not be able to map kernel memory
+            // or ACPI memory, or anything like that
+        }
+
         let frame = FrameAddr::from_start_address(physical_addr)
             .ok_or(MapError::PhysicalAddressUnaligned)?;
 
         self.root
-            .map(virtual_addr, frame, permissions, allocator, cache_policy)
+            .map(
+                virtual_addr,
+                frame,
+                permissions,
+                allocator,
+                cache_policy,
+                global,
+            )
             .map_err(MapError::from)
     }
 
@@ -272,6 +305,10 @@ impl AddressSpace {
         virtual_addr: VirtualAddr,
         allocator: &mut FrameAllocator,
     ) -> Result<FrameAddr, UnmapError> {
+        if self.kind == AddressSpaceKind::User && virtual_addr.as_usize() >= 0x0000_8000_0000_0000 {
+            return Err(UnmapError::InvalidUserAddress);
+        }
+
         unsafe { self.root.unmap(virtual_addr, allocator) }.map_err(UnmapError::from)
     }
 
@@ -293,7 +330,10 @@ impl AddressSpace {
     /// no CPU or kernel operation can access its paging structures.
     pub unsafe fn destroy(self, allocator: &mut FrameAllocator) {
         unsafe {
-            self.root.destroy(allocator);
+            match self.kind {
+                AddressSpaceKind::Kernel => self.root.destroy(allocator),
+                AddressSpaceKind::User => self.root.destroy_user(allocator),
+            }
         }
     }
 }

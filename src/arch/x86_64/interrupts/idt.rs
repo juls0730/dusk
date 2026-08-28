@@ -20,7 +20,7 @@ impl IdtEntry {
     const fn missing() -> Self {
         return Self {
             offset_low: 0,
-            code_selector: 0x08,
+            code_selector: 0,
             ist: 0,
             attributes: 0,
             offset_middle: 0,
@@ -49,6 +49,8 @@ pub(super) struct InterruptStackFrame {
 const INTERRUPT_GATE: u8 = 0b1110;
 const PRESENT: u8 = 1 << 7;
 const KERNEL_INTERRUPT_GATE: u8 = PRESENT | INTERRUPT_GATE;
+const USER_DPL: u8 = 3 << 5;
+const USER_INTERRUPT_GATE: u8 = PRESENT | USER_DPL | INTERRUPT_GATE;
 
 pub(super) type Handler = extern "x86-interrupt" fn(InterruptStackFrame);
 pub(super) type ErrorCodeHandler = extern "x86-interrupt" fn(InterruptStackFrame, u64);
@@ -65,7 +67,7 @@ impl Idt {
     }
 
     pub(super) fn set_handler(&mut self, vector: u8, handler: Handler, ist: u8) {
-        self.set_handler_address(vector, handler as usize, ist);
+        self.set_handler_address(vector, handler as usize, ist, KERNEL_INTERRUPT_GATE);
     }
 
     pub(super) fn set_error_code_handler(
@@ -74,17 +76,21 @@ impl Idt {
         handler: ErrorCodeHandler,
         ist: u8,
     ) {
-        self.set_handler_address(vector, handler as usize, ist);
+        self.set_handler_address(vector, handler as usize, ist, KERNEL_INTERRUPT_GATE);
     }
 
-    fn set_handler_address(&mut self, vector: u8, address: usize, ist: u8) {
+    pub(super) fn set_user_handler(&mut self, vector: u8, handler: Handler, ist: u8) {
+        self.set_handler_address(vector, handler as usize, ist, USER_INTERRUPT_GATE);
+    }
+
+    fn set_handler_address(&mut self, vector: u8, address: usize, ist: u8, attributes: u8) {
         self.entries[vector as usize] = IdtEntry {
             offset_low: address as u16,
             offset_middle: (address >> 16) as u16,
             offset_high: (address >> 32) as u32,
             code_selector: KERNEL_CODE_SELECTOR,
             ist: ist & 0b111,
-            attributes: KERNEL_INTERRUPT_GATE,
+            attributes,
             reserved: 0,
         };
     }
