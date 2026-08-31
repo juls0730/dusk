@@ -3,7 +3,6 @@ use crate::{
         AddressSpace, CachePolicy, FrameAllocator, PagePermissions, PhysicalAddr, VirtualAddr,
     },
     platform::acpi::{InterruptPolarity, TriggerMode},
-    println,
 };
 
 const IOWIN: usize = 0x10;

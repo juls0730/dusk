@@ -1,16 +1,18 @@
-pub mod apic;
+pub(super) mod apic;
 mod cpu;
 mod gdt;
 mod interrupts;
-pub mod io_apic;
+pub(super) mod io_apic;
 mod paging;
 mod pit;
 pub mod port;
+mod syscall;
 pub mod timer;
 
 use core::arch::asm;
 
-pub use interrupts::disable_interrupts;
+pub use cpu::{ThreadContext, switch_context};
+pub use interrupts::{disable_interrupts, disable_interrupts_and_save, restore_interrupts};
 pub(crate) use paging::{
     MapError as PageTableMapError, PageTableCreateError, UnmapError as PageTableUnmapError,
 };
@@ -22,11 +24,7 @@ pub struct ArchState {
 
 use crate::{
     KernelHandoff,
-    arch::{
-        apic::LocalApic,
-        io_apic::{IOAPIC_VIRTUAL_ADDRESS, IoApic},
-        x86_64::interrupts::apic_vectors::PIT_CALIBRATION_VECTOR,
-    },
+    arch::x86_64::cpu::BOOT_CPU,
     memory::{AddressSpace, FrameAllocator, VirtualAddr},
     platform::acpi::Madt,
     println,
@@ -45,6 +43,14 @@ pub fn init() -> ArchState {
     ArchState { paging }
 }
 
+pub fn set_kernel_stack(stack_top: VirtualAddr) {
+    gdt::set_kernel_stack(stack_top);
+
+    unsafe {
+        BOOT_CPU.kernel_stack_top = stack_top.as_usize();
+    }
+}
+
 #[derive(Debug)]
 #[allow(unused)]
 pub enum InterruptInitError {
@@ -60,8 +66,8 @@ pub enum InterruptInitError {
 
 #[derive(Debug)]
 pub struct InterruptController {
-    local_apic: LocalApic,
-    io_apic: IoApic,
+    local_apic: apic::LocalApic,
+    io_apic: io_apic::IoApic,
     local_timer_frequency: u64,
 }
 
@@ -89,7 +95,7 @@ pub fn init_interrupt_controller(
         io_apic_info.id,
         io_apic_info.apic_address,
         io_apic_info.global_system_interrupt_base,
-        IOAPIC_VIRTUAL_ADDRESS,
+        io_apic::IOAPIC_VIRTUAL_ADDRESS,
         allocator,
         address_space,
     )
@@ -107,7 +113,7 @@ pub fn init_interrupt_controller(
         .configure_masked(
             pit_route.gsi,
             io_apic::RedirectionConfig {
-                vector: PIT_CALIBRATION_VECTOR,
+                vector: interrupts::apic_vectors::PIT_CALIBRATION_VECTOR,
                 destination,
                 polarity: pit_route.polarity,
                 trigger: pit_route.trigger,
@@ -165,6 +171,9 @@ pub unsafe fn enter_kernel(stack_top: VirtualAddr, handoff: *mut KernelHandoff) 
     unsafe {
         gdt::set_kernel_stack(stack_top);
 
+        BOOT_CPU.kernel_stack_top = stack_top.as_usize();
+        syscall::init(&raw const BOOT_CPU);
+
         asm!(
             "mov rsp, {stack_top}",
             "xor rbp, rbp",
@@ -193,13 +202,31 @@ pub unsafe fn enter_user(
             "mov ds, {user_data_selector:x}",
             "mov es, {user_data_selector:x}",
             "mov fs, {user_data_selector:x}",
-            "mov gs, {user_data_selector:x}", // ss is handled by iretq
+            "mov gs, {user_data_selector:x}",
 
             "push {user_data_selector}",
             "push {user_stack_pointer}",
-            "pushfq",
+            "push 0x202", // RFLAGS (IF=1, bit 1 reserved=1)
             "push {user_code_selector}",
             "push {user_instruction_pointer}",
+
+            // clear GPRs
+            "xor rax, rax",
+            "xor rbx, rbx",
+            "xor rcx, rcx",
+            "xor rdx, rdx",
+            "xor rsi, rsi",
+            "xor rdi, rdi",
+            "xor rbp, rbp",
+            "xor r8, r8",
+            "xor r9, r9",
+            "xor r10, r10",
+            "xor r11, r11",
+            "xor r12, r12",
+            "xor r13, r13",
+            "xor r14, r14",
+            "xor r15, r15",
+
             "iretq",
             user_data_selector = in(reg) gdt::USER_DATA_SELECTOR as usize,
             user_code_selector = in(reg) gdt::USER_CODE_SELECTOR as usize,

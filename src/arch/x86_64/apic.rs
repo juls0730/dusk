@@ -13,7 +13,6 @@ use crate::{
     memory::{
         AddressSpace, CachePolicy, FrameAllocator, PagePermissions, PhysicalAddr, VirtualAddr,
     },
-    println,
 };
 
 const APIC_ID: u32 = 0x20;

@@ -264,11 +264,20 @@ pub(crate) enum PageTableCreateError {
     OutOfFrames,
 }
 
+#[derive(Debug)]
 pub struct PageTable {
     pub direct_map: DirectMap,
     config: PagingConfig,
     frame: OwnedFrame,
 }
+
+impl PartialEq for PageTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.frame.frame_address() == other.frame.frame_address()
+    }
+}
+
+impl Eq for PageTable {}
 
 impl PageTable {
     pub fn new(

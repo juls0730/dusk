@@ -88,6 +88,7 @@ enum AddressSpaceKind {
     User,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct AddressSpace {
     root: PageTable,
     kind: AddressSpaceKind,

@@ -8,12 +8,14 @@ mod boot;
 mod debug;
 mod memory;
 mod platform;
+mod task;
 
 use crate::{
     debug::serial,
     memory::{
-        AddressSpace, KernelStack, MemoryRegionKind, PagePermissions, UserStack, VirtualAddr,
+        AddressSpace, KernelStackPool, MemoryRegionKind, PagePermissions, UserStack, VirtualAddr,
     },
+    task::tcb::Tcb,
 };
 
 pub struct KernelHandoff {
@@ -21,6 +23,7 @@ pub struct KernelHandoff {
     address_space: AddressSpace,
     direct_map: memory::DirectMap,
     boot_info: boot::BootInfo,
+    kernel_stack_pool: KernelStackPool,
     handoff_frame: memory::OwnedFrame,
 }
 
@@ -49,7 +52,10 @@ pub extern "C" fn _start() -> ! {
 
     println!("Entering kernel main...");
 
-    let bootstrap_stack = KernelStack::allocate(&mut address_space, &mut allocator)
+    let mut kernel_stack_pool = KernelStackPool::new();
+
+    let kernel_stack = kernel_stack_pool
+        .allocate(&mut address_space, &mut allocator)
         .expect("failed to allocate bootstrap stack");
 
     let handoff_frame = allocator
@@ -59,12 +65,13 @@ pub extern "C" fn _start() -> ! {
         .to_virtual(handoff_frame.frame_address().start_address())
         .expect("failed to map kernel handoff");
 
-    let bootstrap_stack_top = bootstrap_stack.top();
+    let bootstrap_stack_top = kernel_stack.top();
     let handoff = KernelHandoff {
         allocator,
         address_space,
         direct_map,
         boot_info,
+        kernel_stack_pool,
         handoff_frame,
     };
 
@@ -82,13 +89,21 @@ pub extern "C" fn _start() -> ! {
 }
 
 pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
-    let (mut allocator, mut address_space, direct_map, boot_info, handoff_frame) = unsafe {
+    let (
+        mut allocator,
+        mut address_space,
+        direct_map,
+        boot_info,
+        mut kernel_stack_pool,
+        handoff_frame,
+    ) = unsafe {
         let handoff = handoff.read();
         (
             handoff.allocator,
             handoff.address_space,
             handoff.direct_map,
             handoff.boot_info,
+            handoff.kernel_stack_pool,
             handoff.handoff_frame,
         )
     };
@@ -106,18 +121,30 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
 
     let acpi = platform::acpi::init(&boot_info, direct_map).expect("failed to initialize ACPI");
 
+    println!("Parsing MADT...");
+
     let madt = acpi
         .madt()
         .expect("failed to parse ACPI")
         .expect("MADT not found");
 
+    println!("Initializing interrupt controller...");
+
     let interrupt_controller =
         arch::init_interrupt_controller(&madt, &mut allocator, &mut address_space)
             .expect("failed to initialize interrupt controller");
 
+    println!("Creating user address space...");
+
+    let task_kernel_stack = kernel_stack_pool
+        .allocate(&mut address_space, &mut allocator)
+        .expect("failed to allocate user task stack");
+
     let mut user_addr_space = address_space
         .new_user(&mut allocator)
         .expect("failed to create user address space");
+
+    println!("Allocating user stack...");
 
     let user_stack = UserStack::allocate(&mut user_addr_space, &mut allocator)
         .expect("failed to allocate user stack");
@@ -138,21 +165,37 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
         .expect("failed to map user code page");
 
     unsafe {
-        user_addr_space.activate();
-
-        let user_code: [u8; 5] = [
+        let user_code: &[u8] = &[
             0xCC, // INT3
-            0xCD, 0x80, // INT 0x80
+            0x0F, 0x05, // SYSCALL
             0xEB, 0xFE, // JMP -2 (loop forever if exit returns)
         ];
 
+        let user_code_virtual = direct_map
+            .translate(user_code_page.start_address())
+            .unwrap();
+
+        println!("Copying user code to {:#X}", user_code_virtual.as_usize());
+
         core::ptr::copy_nonoverlapping(
             user_code.as_ptr(),
-            user_instruction_pointer.as_mut_ptr::<u8>(),
+            user_code_virtual.as_mut_ptr::<u8>(),
             user_code.len(),
         );
 
-        arch::enter_user(user_instruction_pointer, user_stack.top());
+        println!("Activating user address space...");
+
+        let user_tcb = Tcb::new_user(
+            0,
+            user_addr_space,
+            task_kernel_stack,
+            user_instruction_pointer,
+            user_stack.top(),
+        );
+
+        println!("Running first user task {user_tcb:?}...");
+
+        task::tcb::run_first_user(&user_tcb);
     }
 
     hcf();

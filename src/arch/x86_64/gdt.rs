@@ -3,8 +3,8 @@ use core::arch::asm;
 use crate::memory::VirtualAddr;
 
 #[repr(C, align(8))]
-struct Gdt {
-    entries: [u64; 7],
+pub(super) struct Gdt {
+    pub entries: [u64; 7],
 }
 
 impl Gdt {
@@ -49,12 +49,12 @@ const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 
 pub(super) const KERNEL_CODE_SELECTOR: u16 = 1 * 8;
 pub(super) const KERNEL_DATA_SELECTOR: u16 = 2 * 8;
-pub(super) const USER_CODE_SELECTOR: u16 = (3 * 8) | 3;
-pub(super) const USER_DATA_SELECTOR: u16 = (4 * 8) | 3;
+pub(super) const USER_DATA_SELECTOR: u16 = (3 * 8) | 3;
+pub(super) const USER_CODE_SELECTOR: u16 = (4 * 8) | 3;
 pub(super) const TSS_SELECTOR: u16 = 5 * 8;
 
 #[repr(align(16))]
-#[allow(dead_code)] // field 0 is read, rust just cant tell
+#[allow(unused)] // field 0 is read, rust just cant tell
 struct ExceptionStack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
 static mut GDT: Gdt = Gdt::new();
@@ -78,8 +78,10 @@ pub fn init() {
                 0,
                 kernel_code_descriptor(),
                 kernel_data_descriptor(),
-                user_code_descriptor(),
+                // In Long Mode, userland CS will be loaded from STAR 63:48 + 16
+                // and userland SS from STAR 63:48 + 8 on SYSRET.
                 user_data_descriptor(),
+                user_code_descriptor(),
                 tss_low,
                 tss_high,
             ],
