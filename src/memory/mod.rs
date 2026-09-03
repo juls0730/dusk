@@ -1,12 +1,15 @@
 mod address_space;
 mod frame;
 mod stack;
+mod user;
 
 #[allow(unused)]
 pub use address_space::{AddressSpace, AddressSpaceCreateError, MapError, UnmapError};
 pub use frame::{FRAME_SIZE, FrameAddr, FrameAllocator, OwnedFrame};
 #[allow(unused)]
 pub use stack::{KernelStack, KernelStackPool, StackCreateError, UserStack};
+#[allow(unused)]
+pub use user::*;
 
 pub struct KernelSegment {
     pub physical_base: PhysicalAddr,

@@ -1,2 +1,2 @@
-pub mod syscall;
+pub mod scheduler;
 pub mod tcb;

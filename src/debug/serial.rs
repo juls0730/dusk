@@ -160,6 +160,12 @@ pub fn init() -> Result<(), SerialPortError> {
     com1().init()
 }
 
+pub fn write_bytes(bytes: &[u8]) {
+    for byte in bytes {
+        com1().write_byte(*byte);
+    }
+}
+
 pub fn print(args: core::fmt::Arguments) {
     use core::fmt::Write;
 

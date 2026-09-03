@@ -202,7 +202,6 @@ pub unsafe fn enter_user(
             "mov ds, {user_data_selector:x}",
             "mov es, {user_data_selector:x}",
             "mov fs, {user_data_selector:x}",
-            "mov gs, {user_data_selector:x}",
 
             "push {user_data_selector}",
             "push {user_stack_pointer}",
@@ -227,6 +226,10 @@ pub unsafe fn enter_user(
             "xor r14, r14",
             "xor r15, r15",
 
+            // Kernel GS is CpuLocal; leave it in IA32_KERNEL_GS_BASE so
+            // syscall_entry can recover it with SWAPGS.
+            "swapgs",
+            "mov gs, {user_data_selector:x}",
             "iretq",
             user_data_selector = in(reg) gdt::USER_DATA_SELECTOR as usize,
             user_code_selector = in(reg) gdt::USER_CODE_SELECTOR as usize,

@@ -44,6 +44,10 @@ pub fn init(cpu_local: *const CpuLocal) {
         write_msr(IA32_FMASK, RFLAGS_MASK);
         write_msr(IA32_GS_BASE, 0);
         write_msr(IA32_KERNEL_GS_BASE, cpu_local as u64);
+
+        // Kernel code always runs with GS pointing at CpuLocal. User entry
+        // swaps this into IA32_KERNEL_GS_BASE before transitioning to ring 3.
+        asm!("swapgs", options(nostack, preserves_flags));
     }
 }
 
@@ -103,7 +107,7 @@ unsafe extern "C" fn syscall_entry() {
 }
 
 extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
-    let ret = crate::task::syscall::handle(
+    let ret = crate::syscall::handle(
         frame.rax, frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9,
     );
 

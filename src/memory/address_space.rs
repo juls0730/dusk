@@ -2,7 +2,7 @@ use crate::{
     arch::{PageTable, PageTableCreateError, PageTableMapError, PageTableUnmapError, PagingConfig},
     memory::{
         CachePolicy, DirectMap, FRAME_SIZE, FrameAddr, FrameAllocator, KernelMemoryLayout,
-        MemoryRegion, MemoryRegionKind, PagePermissions, PhysicalAddr, VirtualAddr,
+        MemoryRegion, MemoryRegionKind, PagePermissions, PhysicalAddr, USER_SPACE_END, VirtualAddr,
     },
 };
 
@@ -195,7 +195,7 @@ impl AddressSpace {
         let global = self.kind == AddressSpaceKind::Kernel;
 
         if self.kind == AddressSpaceKind::User {
-            if virtual_addr.as_usize() >= 0x0000_8000_0000_0000 {
+            if virtual_addr.as_usize() >= USER_SPACE_END.as_usize() {
                 return Err(MapError::InvalidUserAddress);
             }
 
