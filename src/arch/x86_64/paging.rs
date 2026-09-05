@@ -390,16 +390,6 @@ impl PageTable {
             .ok_or(UnmapError::PageNotMapped)
     }
 
-    fn discard_private_tables(
-        frames: &mut [Option<OwnedFrame>; MAX_INTERMEDIATE_LEVELS],
-        count: usize,
-        allocator: &mut FrameAllocator,
-    ) {
-        for frame in frames[..count].iter_mut().rev().filter_map(Option::take) {
-            unsafe { allocator.dealloc(frame) };
-        }
-    }
-
     fn apply_user_upgrades(
         &mut self,
         upgrades: &[Option<EntryLocation>; MAX_INTERMEDIATE_LEVELS],
@@ -509,34 +499,18 @@ impl PageTable {
         let private_table_count = levels.len() - missing_depth;
         let mut private_tables: [Option<OwnedFrame>; MAX_INTERMEDIATE_LEVELS] =
             core::array::from_fn(|_| None);
-        let mut allocated_count = 0;
-
-        while allocated_count < private_table_count {
-            let private_frame = match allocator.alloc() {
-                Some(frame) => frame,
-                None => {
-                    Self::discard_private_tables(&mut private_tables, allocated_count, allocator);
-                    return Err(MapError::OutOfFrames);
-                }
-            };
-
-            if PageTableEntry::new_table(
-                private_frame.frame_address(),
-                permissions.user_accessible,
-                self.config,
-            )
-            .is_err()
-            {
-                unsafe { allocator.dealloc(private_frame) };
-                Self::discard_private_tables(&mut private_tables, allocated_count, allocator);
-                return Err(MapError::PhysicalAddressTooLarge);
-            }
-
-            private_tables[allocated_count] = Some(private_frame);
-            allocated_count += 1;
-        }
 
         let prepare_result = (|| {
+            for slot in &mut private_tables[..private_table_count] {
+                let frame = allocator.alloc().ok_or(MapError::OutOfFrames)?;
+                let address = frame.frame_address();
+                // Track ownership before validation so every error uses the same cleanup.
+                *slot = Some(frame);
+
+                PageTableEntry::new_table(address, permissions.user_accessible, self.config)
+                    .map_err(|_| MapError::PhysicalAddressTooLarge)?;
+            }
+
             for private_index in 0..private_table_count {
                 let private_frame = private_tables[private_index]
                     .as_ref()
@@ -572,7 +546,9 @@ impl PageTable {
         let publication_entry = match prepare_result {
             Ok(entry) => entry,
             Err(error) => {
-                Self::discard_private_tables(&mut private_tables, allocated_count, allocator);
+                for frame in private_tables.into_iter().rev().flatten() {
+                    unsafe { allocator.dealloc(frame) };
+                }
                 return Err(error);
             }
         };
@@ -583,10 +559,7 @@ impl PageTable {
             [publication_location.index] = publication_entry;
 
         // The published page table now owns these frames.
-        for frame in private_tables[..allocated_count]
-            .iter_mut()
-            .flat_map(Option::take)
-        {
+        for frame in private_tables.into_iter().flatten() {
             let _ = frame.into_raw();
         }
 

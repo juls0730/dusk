@@ -1,6 +1,7 @@
 use crate::{
     arch::ThreadContext,
     memory::{AddressSpace, KernelStack, VirtualAddr},
+    task::loader::LoadedImage,
 };
 
 // Thread Control Block
@@ -26,6 +27,7 @@ pub struct Tcb {
     pub kernel_stack: KernelStack,
     pub context: ThreadContext,
     pub address_space: AddressSpace,
+    pub image: LoadedImage,
 }
 
 impl Tcb {
@@ -33,10 +35,10 @@ impl Tcb {
         id: usize,
         address_space: AddressSpace,
         kernel_stack: KernelStack,
-        user_entry: VirtualAddr,
+        image: LoadedImage,
         user_stack: VirtualAddr,
     ) -> Self {
-        let context = ThreadContext::new(user_entry, user_stack, kernel_stack.top());
+        let context = ThreadContext::new(image.entry, user_stack, kernel_stack.top());
 
         Self {
             id,
@@ -44,6 +46,7 @@ impl Tcb {
             kernel_stack,
             context,
             address_space,
+            image,
         }
     }
 }

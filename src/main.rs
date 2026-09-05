@@ -6,6 +6,7 @@
 mod arch;
 mod boot;
 mod debug;
+mod format;
 mod memory;
 mod platform;
 mod syscall;
@@ -15,10 +16,7 @@ use core::arch::global_asm;
 
 use crate::{
     debug::serial,
-    memory::{
-        AddressSpace, DirectMap, FrameAllocator, KernelStackPool, MemoryRegionKind,
-        PagePermissions, UserStack, VirtualAddr,
-    },
+    memory::{AddressSpace, KernelStackPool, MemoryRegionKind, UserStack},
     task::tcb::Tcb,
 };
 
@@ -92,112 +90,6 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-unsafe extern "C" {
-    static task_a_start: u8;
-    static task_a_end: u8;
-    static task_b_start: u8;
-    static task_b_end: u8;
-    static task_c_start: u8;
-    static task_c_end: u8;
-}
-
-unsafe fn embedded_code(start: *const u8, end: *const u8) -> &'static [u8] {
-    let length = unsafe { end.offset_from(start) as usize };
-    unsafe { core::slice::from_raw_parts(start, length) }
-}
-
-global_asm!(
-    r#"
-   .global task_a_start
-   task_a_start:
-       mov r12d, 100
-
-   .Ltask_a_loop:
-       mov eax, 3
-       mov edi, 1
-       lea rsi, [rip + .Ltask_a_message]
-       mov edx, 7
-       xor r10d, r10d
-       syscall
-
-       mov eax, 1
-       syscall
-
-       dec r12d
-       jnz .Ltask_a_loop
-
-   .Ltask_a_done:
-       mov eax, 2
-       syscall
-       jmp .Ltask_a_done
-
-   .Ltask_a_message:
-       .ascii "task A\n"
-
-   .global task_a_end
-   task_a_end:
-
-
-   .global task_b_start
-   task_b_start:
-       mov r12d, 100
-
-   .Ltask_b_loop:
-       mov eax, 3
-       mov edi, 1
-       lea rsi, [rip + .Ltask_b_message]
-       mov edx, 7
-       xor r10d, r10d
-       syscall
-
-       mov eax, 1
-       syscall
-
-       dec r12d
-       jnz .Ltask_b_loop
-
-   .Ltask_b_done:
-       mov eax, 2
-       syscall
-       jmp .Ltask_b_done
-
-   .Ltask_b_message:
-       .ascii "task B\n"
-
-   .global task_b_end
-   task_b_end:
-
-   .global task_c_start
-   task_c_start:
-       mov r12d, 100
-
-   .Ltask_c_loop:
-       mov eax, 3
-       mov edi, 1
-       lea rsi, [rip + .Ltask_c_message]
-       mov edx, 7
-       xor r10d, r10d
-       syscall
-
-       mov eax, 1
-       syscall
-
-       dec r12d
-       jnz .Ltask_c_loop
-
-   .Ltask_c_done:
-       mov eax, 2
-       syscall
-       jmp .Ltask_c_done
-
-   .Ltask_c_message:
-       .ascii "task C\n"
-
-   .global task_c_end
-   task_c_end:
-   "#
-);
-
 pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
     let (
         mut allocator,
@@ -227,6 +119,9 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
         MemoryRegionKind::BootloaderReclaimable,
     );
 
+    let init_code = format::cpio::find_file(boot_info.initramfs.data(), "init.elf")
+        .expect("Failed to load init program from initramfs");
+
     println!("Initializing local ACPI...",);
 
     let acpi = platform::acpi::init(&boot_info, direct_map).expect("failed to initialize ACPI");
@@ -244,93 +139,35 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
         arch::init_interrupt_controller(&madt, &mut allocator, &mut address_space)
             .expect("failed to initialize interrupt controller");
 
-    let task_a_code = unsafe { embedded_code(&task_a_start, &task_a_end) };
-    let task_b_code = unsafe { embedded_code(&task_b_start, &task_b_end) };
-    let task_c_code = unsafe { embedded_code(&task_c_start, &task_c_end) };
+    let user_kernel_stack = kernel_stack_pool
+        .allocate(&mut address_space, &mut allocator)
+        .expect("failed to allocate task kernel stack");
 
-    let task_a = create_test_task(
-        task_a_code,
-        &mut address_space,
-        &mut kernel_stack_pool,
+    let mut user_address_space = address_space
+        .new_user(&mut allocator)
+        .expect("failed to create user address space");
+
+    let image = task::loader::load_elf(
+        init_code,
+        &mut user_address_space,
         &mut allocator,
         direct_map,
     );
 
-    let task_b = create_test_task(
-        task_b_code,
-        &mut address_space,
-        &mut kernel_stack_pool,
-        &mut allocator,
-        direct_map,
+    let user_stack = UserStack::allocate(&mut user_address_space, &mut allocator)
+        .expect("failed to allocate user stack");
+    let task = Tcb::new_user(
+        0, // overwritten by add_task for now
+        user_address_space,
+        user_kernel_stack,
+        image.expect("Failed to load elf"),
+        user_stack.top(),
     );
 
-    let task_c = create_test_task(
-        task_c_code,
-        &mut address_space,
-        &mut kernel_stack_pool,
-        &mut allocator,
-        direct_map,
-    );
-
-    task::scheduler::add_task(task_a).expect("scheduler is full");
-    task::scheduler::add_task(task_b).expect("scheduler is full");
-    task::scheduler::add_task(task_c).expect("scheduler is full");
+    task::scheduler::add_task(task).expect("scheduler is full");
     task::scheduler::start();
 
     hcf();
-}
-
-fn create_test_task(
-    code: &[u8],
-    kernel_address_space: &mut AddressSpace,
-    kernel_stack_pool: &mut KernelStackPool,
-    allocator: &mut FrameAllocator,
-    direct_map: DirectMap,
-) -> Tcb {
-    assert!(code.len() <= memory::FRAME_SIZE);
-
-    let kernel_stack = kernel_stack_pool
-        .allocate(kernel_address_space, allocator)
-        .expect("failed to allocate task kernel stack");
-
-    let mut user_address_space = kernel_address_space
-        .new_user(allocator)
-        .expect("failed to create user address space");
-
-    let user_stack = UserStack::allocate(&mut user_address_space, allocator)
-        .expect("failed to allocate user stack");
-
-    let entry = VirtualAddr::new(0x8000);
-    let code_frame = allocator
-        .alloc()
-        .expect("failed to allocate code frame")
-        .into_raw();
-
-    user_address_space
-        .map(
-            code_frame.start_address(),
-            entry,
-            PagePermissions::new(false, true, true),
-            allocator,
-            memory::CachePolicy::WriteBack,
-        )
-        .expect("failed to map user code");
-
-    let destination = direct_map
-        .translate(code_frame.start_address())
-        .expect("code frame outside direct map");
-
-    unsafe {
-        core::ptr::copy_nonoverlapping(code.as_ptr(), destination.as_mut_ptr(), code.len());
-    }
-
-    Tcb::new_user(
-        0, // overwritten by add_task for now
-        user_address_space,
-        kernel_stack,
-        entry,
-        user_stack.top(),
-    )
 }
 
 #[panic_handler]

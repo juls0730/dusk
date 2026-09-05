@@ -1,13 +1,13 @@
 use ::limine as limine_api;
 use limine::paging::PagingMode;
-use limine::request::{PagingModeRequest, RsdpRequest};
+use limine::request::{ExecutableCmdlineRequest, ModulesRequest, PagingModeRequest, RsdpRequest};
 
 use limine_api::request::{ExecutableAddressRequest, HhdmRequest, MemmapRequest};
 use limine_api::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 use crate::memory::{
-    KernelMemoryLayout, KernelSegment, MemoryMap, MemoryRegion, MemoryRegionKind, PagePermissions,
-    PhysicalAddr, VirtualAddr,
+    BootString, InitramfsImage, KernelMemoryLayout, KernelSegment, MemoryMap, MemoryRegion,
+    MemoryRegionKind, PagePermissions, PhysicalAddr, VirtualAddr,
 };
 
 /// Sets the base revision to the latest revision supported by the crate.
@@ -21,6 +21,14 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static KERNEL_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static KERNEL_CMDLINE_REQUEST: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static KERNEL_MODULE_REQUEST: ModulesRequest = ModulesRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -58,8 +66,12 @@ unsafe extern "C" {
     static __data_end: u64;
 }
 
+const MAX_COMMAND_LINE_LENGTH: usize = 512;
+
 pub struct BootInfo {
     pub kernel_layout: KernelMemoryLayout,
+    pub command_line: BootString<MAX_COMMAND_LINE_LENGTH>,
+    pub initramfs: InitramfsImage,
     pub hhdm_offset: usize,
     pub memory_map: MemoryMap,
     pub rsdp: VirtualAddr,
@@ -75,6 +87,9 @@ impl BootInfo {
 pub enum BootError {
     UnsupportedBaseRevision,
     FailedToGetKernelAddress,
+    FailedToGetKernelCmdline,
+    FailedToGetModules,
+    FailedToGetInitramfs,
     FailedToGetHHDMAddress,
     FailedToGetMemmap,
     TooManyMemoryRegions,
@@ -90,10 +105,28 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
     let kernel_address = KERNEL_ADDRESS_REQUEST
         .response()
         .ok_or(BootError::FailedToGetKernelAddress)?;
+    let kernel_cmdline = KERNEL_CMDLINE_REQUEST
+        .response()
+        .ok_or(BootError::FailedToGetKernelCmdline)?;
+    let command_line = BootString::from_bytes(kernel_cmdline.cmdline().as_bytes());
+
+    let modules = KERNEL_MODULE_REQUEST
+        .response()
+        .ok_or(BootError::FailedToGetModules)?;
+    let initramfs = modules
+        .modules()
+        .get(0)
+        .map(|module| {
+            let start = VirtualAddr::new(module.data().as_ptr() as usize);
+            let length = module.data().len();
+            InitramfsImage { start, length }
+        })
+        .ok_or(BootError::FailedToGetInitramfs)?;
+
     let hhdm_offset = HHDM_REQUEST
         .response()
         .ok_or(BootError::FailedToGetHHDMAddress)?
-        .offset;
+        .offset as usize;
 
     let rsdp = RSDP_REQUEST.response().ok_or(BootError::FailedToGetRsdp)?;
 
@@ -204,7 +237,9 @@ pub fn load_boot_info() -> Result<BootInfo, BootError> {
                 kernel_data_segment,
             ],
         },
-        hhdm_offset: hhdm_offset as usize,
+        command_line,
+        initramfs,
+        hhdm_offset,
         memory_map,
         rsdp: VirtualAddr::new(rsdp.address as usize),
     })

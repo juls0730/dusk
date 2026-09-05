@@ -113,10 +113,15 @@ impl AddressSpace {
             // undermind the permissions of the explicitly mapped kernel image
             if matches!(
                 region.kind,
-                MemoryRegionKind::Reserved
-                    | MemoryRegionKind::BadMemory
-                    | MemoryRegionKind::KernelAndModules
+                MemoryRegionKind::Reserved | MemoryRegionKind::BadMemory
             ) {
+                continue;
+            }
+
+            // we shouldnt HHDM the kernel image, but we should map modules
+            if region.kind == MemoryRegionKind::KernelAndModules
+                && region.start == layout.segments[0].physical_base
+            {
                 continue;
             }
 

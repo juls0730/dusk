@@ -3,6 +3,9 @@ name = "dusk"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [".", "userspace/init"]
+
 [dependencies]
 limine = "0.6.5"
 

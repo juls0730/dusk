@@ -132,37 +132,6 @@ pub fn init_interrupt_controller(
     })
 }
 
-// #[derive(Debug)]
-// pub enum TimerError {
-//     DurationOverflow,
-// }
-
-// impl InterruptController {
-//     pub fn delay(&self, duration: core::time::Duration) -> Result<(), TimerError> {
-//         let nanoseconds = duration.as_nanos();
-
-//         let ticks = (nanoseconds
-//             .checked_mul(self.local_timer_frequency as u128)
-//             .ok_or(TimerError::DurationOverflow)?
-//             + 999_999_999)
-//             / 1_000_000_000;
-
-//         if ticks == 0 {
-//             return Ok(());
-//         }
-
-//         let mut remaining = ticks;
-
-//         while remaining > 0 {
-//             let chunk = remaining.min(u32::MAX as u128) as u32;
-//             self.local_apic.delay_ticks(chunk);
-//             remaining -= chunk as u128;
-//         }
-
-//         Ok(())
-//     }
-// }
-
 /// # Safety
 ///
 /// The caller must ensure:

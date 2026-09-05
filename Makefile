@@ -6,17 +6,17 @@ MEMORY ?= 512M
 # In MB
 ISO_SIZE ?= 512
 QEMU_OPTS ?= 
-#MKSQUASHFS_OPTS ?= 
 GDB ?= 
 CPUS ?= 1
 # FAT type
 ESP_BITS ?= 32
-EXPORT_SYMBOLS = true
+#EXPORT_SYMBOLS = true
 
 ISO_PATH = ${ARTIFACTS_PATH}/iso_root
-#INITRAMFS_PATH = ${ARTIFACTS_PATH}/initramfs
+INITRAMFS_PATH = ${ARTIFACTS_PATH}/initramfs
 IMAGE_PATH = ${ARTIFACTS_PATH}/${IMAGE_NAME}
 ESP_IMAGE = ${ARTIFACTS_PATH}/esp.img
+USERSPACE_CARGO_OPTS = --target ${ARCH}-unknown-none
 CARGO_OPTS = -Zjson-target-spec --target=src/arch/${ARCH}/${ARCH}-unknown-none.json
 QEMU_OPTS += -m ${MEMORY} -drive id=hd0,format=raw,file=${IMAGE_PATH}
 LIMINE_BOOT_VARIATION = X64
@@ -27,6 +27,7 @@ KERNEL_FILE = target/${ARCH}-unknown-none/${MODE}/dusk.elf
 
 ifeq (${MODE},release)
 	CARGO_OPTS += --release
+	USERSPACE_CARGO_OPTS += --release
 endif
 
 ifneq (${CPUS},1)
@@ -50,7 +51,7 @@ endif
 
 all: build
 
-build: prepare-bin-files compile-bootloader compile-binaries run-scripts build-iso
+build: prepare-bin-files compile-bootloader compile-binaries compile-initramfs build-iso
 
 check: 
 		cargo check -Zjson-target-spec
@@ -63,13 +64,16 @@ prepare-bin-files:
 		# Make bin/ and bin/iso_root
 		mkdir -p ${ARTIFACTS_PATH}
 		mkdir -p ${ISO_PATH}
-		# mkdir -p ${INITRAMFS_PATH}
-run-scripts:
-		# Place the build ID into the binary so it can be read at runtime
-		@HASH=$$(md5sum ${KERNEL_FILE} | cut -c1-12) && \
-		sed -i "s/__BUILD_ID__/$${HASH}/" ${KERNEL_FILE}
+		mkdir -p ${INITRAMFS_PATH}
 
-		#python scripts/initramfs-test.py 100 ${INITRAMFS_PATH}/
+compile-user:
+		RUSTFLAGS="-C relocation-model=static" cargo build --package init ${USERSPACE_CARGO_OPTS}
+
+copy-initramfs-files: compile-user
+		cp -v target/${ARCH}-unknown-none/${MODE}/init ${INITRAMFS_PATH}/init.elf
+
+compile-initramfs: copy-initramfs-files
+		(cd ${INITRAMFS_PATH} && find . -mindepth 1 | cpio -o -H newc) > ${ARTIFACTS_PATH}/initramfs.img
 
 copy-iso-files:
 		# Limine files
@@ -81,7 +85,7 @@ copy-iso-files:
 
 		# OS files
 		cp -v ${KERNEL_FILE} ${ISO_PATH}/boot
-		#cp -v ${ARTIFACTS_PATH}/initramfs.img ${ISO_PATH}/boot
+		cp -v ${ARTIFACTS_PATH}/initramfs.img ${ISO_PATH}/boot
 
 build-esp: copy-iso-files
 		# Create and populate formatted FAT image for ESP partition (130048 1K-blocks = ~127MiB)

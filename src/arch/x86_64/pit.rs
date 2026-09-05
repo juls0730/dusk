@@ -13,15 +13,11 @@ const BINARY: u8 = 0;
 pub const PIT_FREQUENCY: u64 = 1_193_182;
 pub const PIT_CALIBRATION_COUNT: u16 = u16::MAX;
 
-pub struct Pit;
+pub fn start_pit_one_shot(count: u16) {
+    unsafe {
+        write_u8(PIT_COMMAND, CHANNEL_0 | LOW_HIGH | MODE_0 | BINARY);
 
-impl Pit {
-    pub fn start_one_shot(count: u16) {
-        unsafe {
-            write_u8(PIT_COMMAND, CHANNEL_0 | LOW_HIGH | MODE_0 | BINARY);
-
-            write_u8(PIT_CHANNEL_0, count as u8);
-            write_u8(PIT_CHANNEL_0, (count >> 8) as u8);
-        }
+        write_u8(PIT_CHANNEL_0, count as u8);
+        write_u8(PIT_CHANNEL_0, (count >> 8) as u8);
     }
 }

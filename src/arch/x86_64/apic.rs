@@ -183,28 +183,6 @@ impl LocalApic {
         self.access.write(APIC_TIMER_INITIAL_COUNT, 0);
     }
 
-    // pub fn delay_ticks(&self, count: u32) {
-    //     if count == 0 {
-    //         return;
-    //     }
-
-    //     APIC_TIMER_COUNT.store(0, Ordering::SeqCst);
-
-    //     self.access
-    //         .write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64 | APIC_LVT_MASKED);
-    //     self.access.write(APIC_TIMER_DIVIDE_CONFIG, 0b11);
-    //     self.access.write(APIC_TIMER_INITIAL_COUNT, count as u64);
-    //     self.access.write(APIC_LVT_TIMER, APIC_TIMER_VECTOR as u64);
-
-    //     while APIC_TIMER_COUNT.load(Ordering::SeqCst) == 0 {
-    //         unsafe {
-    //             core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack));
-    //         }
-    //     }
-
-    //     self.stop_timer();
-    // }
-
     pub fn id(&self) -> u32 {
         self.id
     }

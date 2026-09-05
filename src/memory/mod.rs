@@ -3,6 +3,8 @@ mod frame;
 mod stack;
 mod user;
 
+use core::ops::Add;
+
 #[allow(unused)]
 pub use address_space::{AddressSpace, AddressSpaceCreateError, MapError, UnmapError};
 pub use frame::{FRAME_SIZE, FrameAddr, FrameAllocator, OwnedFrame};
@@ -10,6 +12,37 @@ pub use frame::{FRAME_SIZE, FrameAddr, FrameAllocator, OwnedFrame};
 pub use stack::{KernelStack, KernelStackPool, StackCreateError, UserStack};
 #[allow(unused)]
 pub use user::*;
+
+pub struct BootString<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> BootString<N> {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let len = bytes.len();
+        let mut boot_string = Self { bytes: [0; N], len };
+        boot_string.bytes[..len].copy_from_slice(bytes);
+        boot_string
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len]).unwrap()
+    }
+}
+
+const MAX_MODULE_PATH_LENGTH: usize = 256;
+
+pub struct InitramfsImage {
+    pub start: VirtualAddr,
+    pub length: usize,
+}
+
+impl InitramfsImage {
+    pub fn data(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.start.as_ptr(), self.length) }
+    }
+}
 
 pub struct KernelSegment {
     pub physical_base: PhysicalAddr,
@@ -72,6 +105,14 @@ impl VirtualAddr {
 
     pub const unsafe fn as_ptr<T>(self) -> *const T {
         self.as_usize() as *const T
+    }
+}
+
+impl Add<usize> for VirtualAddr {
+    type Output = Self;
+
+    fn add(self, rhs: usize) -> Self::Output {
+        Self(self.0 + rhs)
     }
 }
 

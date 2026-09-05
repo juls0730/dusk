@@ -7,7 +7,7 @@ use crate::{
         io_apic::IoApic,
         x86_64::{
             interrupts::enable_interrupts,
-            pit::{PIT_CALIBRATION_COUNT, PIT_FREQUENCY, Pit},
+            pit::{PIT_CALIBRATION_COUNT, PIT_FREQUENCY, start_pit_one_shot},
         },
     },
     platform::acpi::IsaIrqRoute,
@@ -37,7 +37,7 @@ pub fn calibrate_local_apic(
         .map_err(|_| TimerCalibrationError::IoApicNotHandled)?;
     local_apic.start_calibration_counter();
 
-    Pit::start_one_shot(PIT_CALIBRATION_COUNT);
+    start_pit_one_shot(PIT_CALIBRATION_COUNT);
 
     enable_interrupts();
 
