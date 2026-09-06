@@ -4,7 +4,7 @@ use crate::{
     arch::ThreadContext,
     memory::{AddressSpace, VirtualAddr},
     println,
-    task::tcb::{ExitReason, Tcb, ThreadState},
+    task::tcb::{BlockReason, ExitReason, Tcb, ThreadState},
 };
 
 const MAX_TASKS: usize = 32;
@@ -42,7 +42,7 @@ impl Scheduler {
             previous_context: prev_ctx,
             next_context: next_ctx,
             next_address_space: next_addr_space,
-            next_kernel_stack: next_kernel_stack,
+            next_kernel_stack,
             activate_address_space: unsafe { *next_addr_space != *prev_addr_space },
         }
     }
@@ -170,6 +170,65 @@ pub fn start() -> ! {
     }
 
     panic!("scheduler returned to bootstrap context");
+}
+
+pub fn get_task(id: TaskId) -> Option<&'static Tcb> {
+    let scheduler = unsafe { &mut *SCHEDULER.0.get() };
+    scheduler.tasks.get(id).and_then(Option::as_ref)
+}
+
+pub fn get_task_mut(id: TaskId) -> Option<&'static mut Tcb> {
+    let scheduler = unsafe { &mut *SCHEDULER.0.get() };
+    scheduler.tasks.get_mut(id).and_then(Option::as_mut)
+}
+
+pub fn current() -> TaskId {
+    let scheduler = unsafe { &mut *SCHEDULER.0.get() };
+    scheduler.current.expect("no current task")
+}
+
+pub fn block_current(reason: BlockReason) {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+
+    let switch = {
+        let scheduler = unsafe { &mut *SCHEDULER.0.get() };
+
+        let Some(next_id) = scheduler.ready.pop_front() else {
+            println!("Deadlock: all tasks blocked");
+            crate::hcf();
+        };
+
+        let current_id = scheduler.current.expect("no current task");
+
+        scheduler.tasks[current_id].as_mut().unwrap().state = ThreadState::Blocked(reason);
+        // explicitly do NOT push back the current task, because it is not ready
+
+        scheduler.tasks[next_id].as_mut().unwrap().state = ThreadState::Running;
+        scheduler.current = Some(next_id);
+
+        scheduler.make_switch(current_id, next_id)
+    };
+
+    unsafe {
+        switch.perform();
+    }
+
+    // this runs when this task is selected to run again
+    crate::arch::restore_interrupts(interrupt_state);
+}
+
+pub fn unblock(id: TaskId) {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+
+    let scheduler = unsafe { &mut *SCHEDULER.0.get() };
+    if let Some(task) = scheduler.tasks[id].as_mut() {
+        if matches!(task.state, ThreadState::Blocked(_)) {
+            task.state = ThreadState::Ready;
+            assert!(scheduler.ready.push_back(id));
+        }
+    }
+
+    crate::arch::restore_interrupts(interrupt_state);
 }
 
 pub fn yield_current() {

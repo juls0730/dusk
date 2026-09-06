@@ -176,6 +176,7 @@ impl KernelStack {
     }
 }
 
+#[derive(Debug)]
 pub struct UserStack {
     mapping: StackMapping,
 }

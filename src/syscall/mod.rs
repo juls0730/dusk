@@ -19,6 +19,8 @@ pub enum SyscallNumber {
     Yield = 1,
     Exit = 2,
     Write = 3,
+    Send = 4,
+    Recv = 5,
 }
 
 impl TryFrom<u64> for SyscallNumber {
@@ -28,6 +30,8 @@ impl TryFrom<u64> for SyscallNumber {
             1 => Ok(Self::Yield),
             2 => Ok(Self::Exit),
             3 => Ok(Self::Write),
+            4 => Ok(Self::Send),
+            5 => Ok(Self::Recv),
             _ => Err(Status::InvalidArgument),
         }
     }
@@ -41,6 +45,10 @@ pub fn handle(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, _arg4: u64, 
             SyscallNumber::Exit => sys_exit(arg0 as usize),
             SyscallNumber::Write => {
                 sys_write(arg0 as usize, arg1 as usize, arg2 as usize, arg3 as usize)
+            }
+            SyscallNumber::Send => sys_send(arg0 as usize, arg1 as usize, arg2 as usize),
+            SyscallNumber::Recv => {
+                sys_recv(arg0 as usize, arg1 as usize, arg2 as usize, arg3 as usize)
             }
         }
     })();

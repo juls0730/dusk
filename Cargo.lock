@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "client"
+version = "0.1.0"
+dependencies = [
+ "dusk-sys",
+]
+
+[[package]]
 name = "dusk"
 version = "0.1.0"
 dependencies = [
@@ -10,7 +17,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "init"
+name = "dusk-sys"
 version = "0.1.0"
 
 [[package]]
@@ -18,3 +25,10 @@ name = "limine"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29363c0f37e66e18575fadf7141c56ee7ea04ae5fecbeb25eff303f77af203a9"
+
+[[package]]
+name = "omega3"
+version = "0.1.0"
+dependencies = [
+ "dusk-sys",
+]

@@ -1,15 +1,12 @@
 [package]
-name = "dusk"
+name = "client"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-members = [".", "userspace/*"]
-
 [dependencies]
-limine = "0.6.5"
+dusk-sys = { path = "../dusk-sys" }
 
 [[bin]]
-name = "dusk"
+name = "client"
 test = false
 bench = false

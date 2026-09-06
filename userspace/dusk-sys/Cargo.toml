@@ -1,9 +1,8 @@
 [package]
-name = "init"
+name = "dusk-sys"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "init"
+[lib]
 test = false
 bench = false

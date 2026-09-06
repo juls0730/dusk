@@ -12,12 +12,9 @@ mod platform;
 mod syscall;
 mod task;
 
-use core::arch::global_asm;
-
 use crate::{
     debug::serial,
-    memory::{AddressSpace, KernelStackPool, MemoryRegionKind, UserStack},
-    task::tcb::Tcb,
+    memory::{AddressSpace, KernelStackPool, MemoryRegionKind},
 };
 
 pub struct KernelHandoff {
@@ -119,9 +116,6 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
         MemoryRegionKind::BootloaderReclaimable,
     );
 
-    let init_code = format::cpio::find_file(boot_info.initramfs.data(), "init.elf")
-        .expect("Failed to load init program from initramfs");
-
     println!("Initializing local ACPI...",);
 
     let acpi = platform::acpi::init(&boot_info, direct_map).expect("failed to initialize ACPI");
@@ -139,35 +133,25 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
         arch::init_interrupt_controller(&madt, &mut allocator, &mut address_space)
             .expect("failed to initialize interrupt controller");
 
-    let user_kernel_stack = kernel_stack_pool
-        .allocate(&mut address_space, &mut allocator)
-        .expect("failed to allocate task kernel stack");
-
-    let mut user_address_space = address_space
-        .new_user(&mut allocator)
-        .expect("failed to create user address space");
-
-    let image = task::loader::load_elf(
-        init_code,
-        &mut user_address_space,
+    task::bootstrap::spawn(
+        "omega3.elf",
+        boot_info.initramfs.data(),
+        &mut address_space,
         &mut allocator,
         direct_map,
+        &mut kernel_stack_pool,
     );
 
-    let user_stack = UserStack::allocate(&mut user_address_space, &mut allocator)
-        .expect("failed to allocate user stack");
-    let task = Tcb::new_user(
-        0, // overwritten by add_task for now
-        user_address_space,
-        user_kernel_stack,
-        image.expect("Failed to load elf"),
-        user_stack.top(),
+    task::bootstrap::spawn(
+        "client.elf",
+        boot_info.initramfs.data(),
+        &mut address_space,
+        &mut allocator,
+        direct_map,
+        &mut kernel_stack_pool,
     );
 
-    task::scheduler::add_task(task).expect("scheduler is full");
     task::scheduler::start();
-
-    hcf();
 }
 
 #[panic_handler]
