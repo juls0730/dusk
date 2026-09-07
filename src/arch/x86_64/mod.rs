@@ -64,7 +64,6 @@ pub enum InterruptInitError {
     PitNotHandled,
 }
 
-#[derive(Debug)]
 pub struct InterruptController {
     local_apic: apic::LocalApic,
     io_apic: io_apic::IoApic,
@@ -164,8 +163,6 @@ pub unsafe fn enter_user(
     user_instruction_pointer: VirtualAddr,
     user_stack_pointer: VirtualAddr,
 ) -> ! {
-    println!("Entering user mode");
-
     unsafe {
         asm!(
             "mov ds, {user_data_selector:x}",

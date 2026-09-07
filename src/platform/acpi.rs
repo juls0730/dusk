@@ -12,7 +12,6 @@ pub enum AcpiError {
     MultipleIoApicsUnsupported,
 }
 
-#[derive(Debug)]
 pub struct AcpiTables {
     direct_map: DirectMap,
     root: RootTable,
@@ -215,7 +214,6 @@ impl AcpiTables {
     }
 }
 
-#[derive(Debug)]
 enum RootTable {
     Rsdt(Sdt),
     Xsdt(Sdt),
@@ -251,7 +249,7 @@ impl RootTable {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct Rsdp {
     signature: [u8; 8],
     checksum: u8,
@@ -261,7 +259,7 @@ struct Rsdp {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct Xsdp {
     rsdp: Rsdp,
     length: u32,
@@ -271,7 +269,7 @@ struct Xsdp {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct SDTHeader {
     signature: [u8; 4],
     length: u32,
@@ -284,14 +282,12 @@ struct SDTHeader {
     creator_revision: u32,
 }
 
-#[derive(Debug)]
 pub struct Sdt {
     physical_addr: PhysicalAddr,
     length: usize,
     signature: [u8; 4],
 }
 
-#[derive(Debug)]
 #[allow(unused)]
 pub struct Madt<'a> {
     acpi: &'a AcpiTables,
@@ -301,7 +297,7 @@ pub struct Madt<'a> {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct MadtBody {
     local_apic_address: u32,
     flags: u32,
@@ -543,21 +539,20 @@ impl<'a> Iterator for MadtEntries<'a> {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct MadtEntryHeader {
     kind: u8,
     length: u8,
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct LocalApicEntry {
     processor_id: u8,
     id: u8,
     flags: u32,
 }
 
-#[derive(Debug)]
 pub struct IoApicInfo {
     pub id: u8,
     pub apic_address: PhysicalAddr,
@@ -565,7 +560,7 @@ pub struct IoApicInfo {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct IoApicEntry {
     id: u8,
     reserved: u8,
@@ -574,7 +569,7 @@ pub struct IoApicEntry {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct InterruptSourceOverride {
     bus: u8,
     source: u8,
@@ -582,19 +577,19 @@ pub struct InterruptSourceOverride {
     flags: u16,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub enum InterruptPolarity {
     ActiveHigh,
     ActiveLow,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub enum TriggerMode {
     Edge,
     Level,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct IsaIrqRoute {
     pub gsi: u32,
     pub polarity: InterruptPolarity,
@@ -602,7 +597,7 @@ pub struct IsaIrqRoute {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct IoApicNmiEntry {
     nmi_source: u8,
     reserved: u8,
@@ -611,7 +606,7 @@ pub struct IoApicNmiEntry {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct LocalApicNmiEntry {
     processor_id: u8,
     flags: u16,
@@ -619,14 +614,14 @@ pub struct LocalApicNmiEntry {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct LocalApicAddressOverride {
     reserved: u16,
     local_apic_address: u64,
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct LocalX2ApicEntry {
     reserved: u16,
     local_x2apic_id: u32,
@@ -634,7 +629,7 @@ pub struct LocalX2ApicEntry {
     acpi_processor_uid: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 #[allow(unused)]
 pub enum MadtEntry {
     LocalApic(LocalApicEntry),

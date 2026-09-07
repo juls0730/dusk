@@ -176,7 +176,6 @@ impl KernelStack {
     }
 }
 
-#[derive(Debug)]
 pub struct UserStack {
     mapping: StackMapping,
 }
@@ -216,7 +215,7 @@ pub struct KernelStackPool {
 }
 
 impl KernelStackPool {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { free_slots: 0 }
     }
 

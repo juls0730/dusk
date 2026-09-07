@@ -21,6 +21,13 @@ name = "dusk-sys"
 version = "0.1.0"
 
 [[package]]
+name = "echo"
+version = "0.1.0"
+dependencies = [
+ "dusk-sys",
+]
+
+[[package]]
 name = "limine"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -11,7 +11,7 @@ use crate::{
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_TABLE_ENTRIES: usize = 512;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct PagingConfig {
     physical_address_bits: u8,
     global_pages: bool,
@@ -42,7 +42,7 @@ impl PagingConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 enum PagingMode {
     FourLevel,
     FiveLevel,
@@ -77,7 +77,7 @@ impl PagingMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PageTableLevel {
     Pml5,
     Pml4,
@@ -106,14 +106,13 @@ impl PageTableLevel {
     }
 }
 
-#[derive(Debug)]
 enum PageTableEntryError {
     PhysicalAddressTooLarge,
     NoExecuteUnsupported,
 }
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct PageTableEntry(u64);
 
 impl PageTableEntry {
@@ -229,7 +228,6 @@ impl PageTableEntry {
     }
 }
 
-#[derive(Debug)]
 pub(crate) enum MapError {
     InvalidVirtualAddress,
     VirtualAddressUnaligned,
@@ -264,7 +262,6 @@ pub(crate) enum PageTableCreateError {
     OutOfFrames,
 }
 
-#[derive(Debug)]
 pub struct PageTable {
     pub direct_map: DirectMap,
     config: PagingConfig,

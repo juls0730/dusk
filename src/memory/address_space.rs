@@ -1,3 +1,5 @@
+use core::cell::UnsafeCell;
+
 use crate::{
     arch::{PageTable, PageTableCreateError, PageTableMapError, PageTableUnmapError, PagingConfig},
     memory::{
@@ -5,6 +7,105 @@ use crate::{
         MemoryRegion, MemoryRegionKind, PagePermissions, PhysicalAddr, USER_SPACE_END, VirtualAddr,
     },
 };
+
+const MAX_ADDRESS_SPACES: usize = 32;
+struct AddressSpaceTable {
+    entries: [Option<AddressSpace>; MAX_ADDRESS_SPACES],
+}
+
+impl AddressSpaceTable {
+    const fn new() -> Self {
+        Self {
+            entries: [const { None }; MAX_ADDRESS_SPACES],
+        }
+    }
+
+    fn insert(&mut self, address_space: AddressSpace) -> Option<usize> {
+        for (i, slot) in self.entries.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(address_space);
+                return Some(i);
+            }
+        }
+
+        None
+    }
+
+    fn get(&self, id: usize) -> Option<&AddressSpace> {
+        self.entries.get(id).and_then(Option::as_ref)
+    }
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut AddressSpace> {
+        self.entries.get_mut(id).and_then(Option::as_mut)
+    }
+
+    fn remove(&mut self, id: usize) -> Option<AddressSpace> {
+        self.entries.get_mut(id).and_then(Option::take)
+    }
+}
+
+struct GlobalAddressSpaceTable(UnsafeCell<AddressSpaceTable>);
+
+unsafe impl Sync for GlobalAddressSpaceTable {}
+
+static ADDRESS_SPACE_TABLE: GlobalAddressSpaceTable =
+    GlobalAddressSpaceTable(UnsafeCell::new(AddressSpaceTable::new()));
+
+pub fn insert_address_space(address_space: AddressSpace) -> Option<usize> {
+    let table = unsafe { &mut *ADDRESS_SPACE_TABLE.0.get() };
+
+    let id = table.insert(address_space);
+    id
+}
+
+pub fn remove_address_space(id: usize) -> Option<AddressSpace> {
+    let table = unsafe { &mut *ADDRESS_SPACE_TABLE.0.get() };
+
+    table.remove(id)
+}
+
+pub fn with_address_space<R>(id: usize, f: impl FnOnce(&AddressSpace) -> R) -> Option<R> {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    let table = unsafe { &*ADDRESS_SPACE_TABLE.0.get() };
+    let res = table.get(id).map(f);
+    crate::arch::restore_interrupts(interrupt_state);
+    res
+}
+
+pub fn with_address_space_mut<R>(id: usize, f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    let table = unsafe { &mut *ADDRESS_SPACE_TABLE.0.get() };
+    let res = table.get_mut(id).map(f);
+    crate::arch::restore_interrupts(interrupt_state);
+    res
+}
+
+struct GlobalKernelAddressSpace(UnsafeCell<Option<AddressSpace>>);
+
+unsafe impl Sync for GlobalKernelAddressSpace {}
+
+static KERNEL_ADDRESS_SPACE: GlobalKernelAddressSpace =
+    GlobalKernelAddressSpace(UnsafeCell::new(None));
+
+pub fn init_kernel_address_space(address_space: AddressSpace) {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    unsafe {
+        *KERNEL_ADDRESS_SPACE.0.get() = Some(address_space);
+    }
+    crate::arch::restore_interrupts(interrupt_state);
+}
+
+pub fn with_kernel_address_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> R {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    let space = unsafe {
+        (&mut *KERNEL_ADDRESS_SPACE.0.get())
+            .as_mut()
+            .expect("kernel address space not initialized")
+    };
+    let res = f(space);
+    crate::arch::restore_interrupts(interrupt_state);
+    res
+}
 
 #[derive(Debug)]
 pub enum MapError {
@@ -82,13 +183,13 @@ impl From<PageTableCreateError> for AddressSpaceCreateError {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 enum AddressSpaceKind {
     Kernel,
     User,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct AddressSpace {
     root: PageTable,
     kind: AddressSpaceKind,

@@ -36,7 +36,6 @@ const APIC_TIMER_INITIAL_COUNT: u32 = 0x380;
 const APIC_TIMER_CURRENT_COUNT: u32 = 0x390;
 const APIC_TIMER_DIVIDE_CONFIG: u32 = 0x3E0;
 
-#[derive(Debug)]
 enum LocalApicAccess {
     X2Apic,
     XApic,
@@ -88,7 +87,6 @@ pub enum LocalApicError {
     NotBootSystemProcessor,
 }
 
-#[derive(Debug)]
 pub struct LocalApic {
     id: u32,
     access: LocalApicAccess,

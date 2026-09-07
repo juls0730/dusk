@@ -2,9 +2,11 @@ use core::cell::UnsafeCell;
 
 use crate::{
     arch::ThreadContext,
-    memory::{AddressSpace, VirtualAddr},
+    memory::{
+        AddressSpace, FrameAllocator, KernelStack, KernelStackPool, StackCreateError, VirtualAddr,
+    },
     println,
-    task::tcb::{BlockReason, ExitReason, Tcb, ThreadState},
+    task::tcb::{BlockReason, ExitReason, Handle, KernelObject, Rights, Tcb, ThreadState},
 };
 
 const MAX_TASKS: usize = 32;
@@ -15,6 +17,7 @@ struct Scheduler {
     current: Option<TaskId>,
     tasks: [Option<Tcb>; MAX_TASKS],
     ready: ReadyQueue,
+    stacks: KernelStackPool,
 }
 
 impl Scheduler {
@@ -23,6 +26,7 @@ impl Scheduler {
             current: None,
             tasks: [const { None }; MAX_TASKS],
             ready: ReadyQueue::new(),
+            stacks: KernelStackPool::new(),
         }
     }
 
@@ -31,19 +35,19 @@ impl Scheduler {
 
         let current = self.tasks[current_id].as_mut().unwrap();
         let prev_ctx = &mut current.context as *mut ThreadContext;
-        let prev_addr_space = &current.address_space as *const AddressSpace;
+        let prev_as_id = current.as_id;
 
         let next = self.tasks[next_id].as_ref().unwrap();
         let next_ctx = &next.context as *const ThreadContext;
-        let next_addr_space = &next.address_space as *const AddressSpace;
+        let next_as_id = next.as_id;
         let next_kernel_stack = next.kernel_stack.top();
 
         Switch {
             previous_context: prev_ctx,
             next_context: next_ctx,
-            next_address_space: next_addr_space,
+            next_as_id,
             next_kernel_stack,
-            activate_address_space: unsafe { *next_addr_space != *prev_addr_space },
+            activate_address_space: next_as_id != prev_as_id,
         }
     }
 }
@@ -51,7 +55,7 @@ impl Scheduler {
 struct Switch {
     previous_context: *mut ThreadContext,
     next_context: *const ThreadContext,
-    next_address_space: *const AddressSpace,
+    next_as_id: usize,
     next_kernel_stack: VirtualAddr,
     activate_address_space: bool,
 }
@@ -59,9 +63,9 @@ struct Switch {
 impl Switch {
     unsafe fn perform(self) {
         if self.activate_address_space {
-            unsafe {
-                (&*self.next_address_space).activate();
-            }
+            crate::memory::with_address_space(self.next_as_id, |as_ref| unsafe {
+                as_ref.activate();
+            });
         }
 
         crate::arch::set_kernel_stack(self.next_kernel_stack);
@@ -110,6 +114,23 @@ impl ReadyQueue {
 
         Some(task)
     }
+
+    pub fn remove(&mut self, task: TaskId) -> bool {
+        for i in 0..self.len {
+            let idx = (self.head + i) % MAX_TASKS;
+            if self.entries[idx] == task {
+                for j in i..(self.len - 1) {
+                    let from = (self.head + j + 1) % MAX_TASKS;
+                    let to = (self.head + j) % MAX_TASKS;
+                    self.entries[to] = self.entries[from];
+                }
+                self.len -= 1;
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 struct GlobalScheduler(UnsafeCell<Scheduler>);
@@ -127,6 +148,12 @@ pub fn add_task(mut task: Tcb) -> Result<TaskId, Tcb> {
         match scheduler.tasks.iter().position(Option::is_none) {
             Some(id) => {
                 task.id = id;
+
+                task.handles.push(Handle {
+                    object: KernelObject::Thread(id),
+                    rights: Rights::READ | Rights::WRITE | Rights::EXECUTE,
+                });
+
                 task.state = ThreadState::Ready;
                 scheduler.tasks[id] = Some(task);
                 assert!(scheduler.ready.push_back(id));
@@ -159,7 +186,7 @@ pub fn start() -> ! {
         Switch {
             previous_context: &mut bootstrap_context,
             next_context: &next.context,
-            next_address_space: &next.address_space,
+            next_as_id: next.as_id,
             next_kernel_stack: next.kernel_stack.top(),
             activate_address_space: true,
         }
@@ -170,6 +197,38 @@ pub fn start() -> ! {
     }
 
     panic!("scheduler returned to bootstrap context");
+}
+
+pub fn allocate_kernel_stack(
+    address_space: &mut AddressSpace,
+    allocator: &mut FrameAllocator,
+) -> Result<KernelStack, StackCreateError> {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    let scheduler = unsafe { &mut *SCHEDULER.0.get() };
+    let result = scheduler.stacks.allocate(address_space, allocator);
+    crate::arch::restore_interrupts(interrupt_state);
+    result
+}
+
+pub fn remove_task(id: TaskId) -> Option<Tcb> {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+
+    let result = {
+        let scheduler = unsafe { &mut *SCHEDULER.0.get() };
+
+        if scheduler.current == Some(id) {
+            None
+        } else if let Some(task) = scheduler.tasks.get_mut(id).and_then(Option::take) {
+            scheduler.ready.remove(id);
+            scheduler.stacks.free(&task.kernel_stack);
+            Some(task)
+        } else {
+            None
+        }
+    };
+
+    crate::arch::restore_interrupts(interrupt_state);
+    result
 }
 
 pub fn get_task(id: TaskId) -> Option<&'static Tcb> {

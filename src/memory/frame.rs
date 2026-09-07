@@ -1,3 +1,5 @@
+use core::cell::UnsafeCell;
+
 use crate::memory::{DirectMap, MemoryRegion, MemoryRegionKind, PhysicalAddr, VirtualAddr};
 
 pub const FRAME_SIZE: usize = 4096;
@@ -12,15 +14,57 @@ pub fn align_down_to_frame(addr: usize) -> usize {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FrameState {
     Reserved = 0b00,
     Free = 0b01,
     Allocated = 0b10,
 }
 
+struct GlobalFrameAllocator(UnsafeCell<Option<FrameAllocator>>);
+unsafe impl Sync for GlobalFrameAllocator {}
+
+static FRAME_ALLOCATOR: GlobalFrameAllocator = GlobalFrameAllocator(UnsafeCell::new(None));
+
+pub fn init_global(allocator: FrameAllocator) {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    unsafe {
+        *FRAME_ALLOCATOR.0.get() = Some(allocator);
+    }
+    crate::arch::restore_interrupts(interrupt_state);
+}
+
+pub fn alloc_frame() -> Option<OwnedFrame> {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    let allocator = unsafe { &mut *FRAME_ALLOCATOR.0.get() };
+    let frame = allocator.as_mut().and_then(|a| a.alloc());
+    crate::arch::restore_interrupts(interrupt_state);
+    frame
+}
+
+pub unsafe fn dealloc_frame(frame: OwnedFrame) {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    let allocator = unsafe { &mut *FRAME_ALLOCATOR.0.get() };
+    if let Some(a) = allocator.as_mut() {
+        unsafe { a.dealloc(frame) };
+    }
+    crate::arch::restore_interrupts(interrupt_state);
+}
+
+#[allow(unused)]
+pub fn with_allocator<R>(f: impl FnOnce(&mut FrameAllocator) -> R) -> R {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    let allocator = unsafe {
+        (&mut *FRAME_ALLOCATOR.0.get())
+            .as_mut()
+            .expect("frame allocator not initialized")
+    };
+    let result = f(allocator);
+    crate::arch::restore_interrupts(interrupt_state);
+    result
+}
+
 // 64 KiB per GiB
-#[derive(Debug)]
 struct Bitmap {
     start: VirtualAddr,
     frame_count: usize,
@@ -70,7 +114,6 @@ pub enum FrameAllocatorInitError {
 }
 
 // very very simple bitmap frame/page allocator
-#[derive(Debug)]
 pub struct FrameAllocator {
     bitmap: Bitmap,
     next_search: usize,
@@ -327,7 +370,6 @@ impl FrameAddr {
 }
 
 // specifically not Clone or Copy
-#[derive(Debug)]
 pub struct OwnedFrame {
     frame: FrameAddr,
 }

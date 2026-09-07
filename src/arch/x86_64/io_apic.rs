@@ -31,7 +31,6 @@ pub struct RedirectionConfig {
     pub trigger: TriggerMode,
 }
 
-#[derive(Debug)]
 pub struct IoApic {
     base: VirtualAddr,
     global_interrupt_base: u32,

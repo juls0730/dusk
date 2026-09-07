@@ -69,10 +69,12 @@ prepare-bin-files:
 compile-user:
 		RUSTFLAGS="-C relocation-model=static" cargo build --package omega3 ${USERSPACE_CARGO_OPTS}
 		RUSTFLAGS="-C relocation-model=static" cargo build --package client ${USERSPACE_CARGO_OPTS}
+		RUSTFLAGS="-C relocation-model=static" cargo build --package echo ${USERSPACE_CARGO_OPTS}
 
 copy-initramfs-files: compile-user
 		cp -v target/${ARCH}-unknown-none/${MODE}/omega3 ${INITRAMFS_PATH}/omega3.elf
 		cp -v target/${ARCH}-unknown-none/${MODE}/client ${INITRAMFS_PATH}/client.elf
+		cp -v target/${ARCH}-unknown-none/${MODE}/echo ${INITRAMFS_PATH}/echo.elf
 
 compile-initramfs: copy-initramfs-files
 		(cd ${INITRAMFS_PATH} && find . -mindepth 1 | cpio -o -H newc) > ${ARTIFACTS_PATH}/initramfs.img

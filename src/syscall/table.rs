@@ -1,6 +1,10 @@
 use crate::{
-    memory::{VirtualAddr, copy_from_user, copy_to_user, copy_val_to_user},
-    task::tcb::{BlockReason, MAX_MSG_SIZE, Message},
+    memory::{
+        FRAME_SIZE, OwnedFrame, PagePermissions, USER_SPACE_END, VirtualAddr, copy_from_user,
+        copy_to_user, copy_val_to_user,
+    },
+    println,
+    task::tcb::{BlockReason, Handle, KernelObject, MAX_MSG_SIZE, Message, Rights},
 };
 
 use super::Status;
@@ -76,19 +80,17 @@ pub fn sys_recv(
         return Err(Status::InvalidArgument);
     }
 
-    let mut interrupt_state = crate::arch::disable_interrupts_and_save();
-
     let current_task = crate::task::scheduler::get_task_mut(crate::task::scheduler::current())
         .ok_or(Status::NoSuchTask)?;
 
     if current_task.mailbox.len == 0 {
-        crate::arch::restore_interrupts(interrupt_state);
         crate::task::scheduler::block_current(BlockReason::Recv { ep: 0 });
-        interrupt_state = crate::arch::disable_interrupts_and_save();
     }
 
     // if we blocked, we will wake up when the mailbox is non-empty
 
+    let current_task = crate::task::scheduler::get_task_mut(crate::task::scheduler::current())
+        .ok_or(Status::NoSuchTask)?;
     let msg = current_task.mailbox.pop().ok_or(Status::NoSuchTask)?;
 
     copy_to_user(
@@ -102,7 +104,255 @@ pub fn sys_recv(
         copy_val_to_user(VirtualAddr::new(out_sender), &msg.sender)?;
     }
 
-    crate::arch::restore_interrupts(interrupt_state);
+    Ok(())
+}
+
+pub fn sys_frame_alloc(out_handle: usize) -> Result<(), Status> {
+    if out_handle == 0 {
+        return Err(Status::InvalidArgument);
+    }
+
+    let frame = crate::memory::alloc_frame().ok_or(Status::OutOfMemory)?;
+
+    let task_id = crate::task::scheduler::current();
+    let task = match crate::task::scheduler::get_task_mut(task_id) {
+        Some(task) => task,
+        None => {
+            unsafe { crate::memory::dealloc_frame(frame) };
+            return Err(Status::NoSuchTask);
+        }
+    };
+
+    let frame_addr = frame.into_raw();
+    let handle = Handle {
+        object: KernelObject::Frame(frame_addr),
+        rights: Rights::READ | Rights::WRITE | Rights::EXECUTE,
+    };
+
+    let handle_id = match task.handles.push(handle) {
+        Some(id) => id,
+        None => {
+            unsafe { crate::memory::dealloc_frame(OwnedFrame::from_raw(frame_addr)) };
+            return Err(Status::OutOfMemory);
+        }
+    };
+
+    copy_val_to_user(VirtualAddr::new(out_handle), &handle_id)?;
+
+    Ok(())
+}
+
+pub fn sys_frame_dealloc(frame_handle: usize) -> Result<(), Status> {
+    let task = crate::task::scheduler::current();
+    let task = crate::task::scheduler::get_task_mut(task).ok_or(Status::NoSuchTask)?;
+
+    let frame_handle = task.handles.get(frame_handle).ok_or(Status::BadHandle)?;
+    let frame = match frame_handle.object {
+        KernelObject::Frame(frame_addr) => frame_addr,
+        _ => return Err(Status::InvalidArgument),
+    };
+
+    unsafe { crate::memory::dealloc_frame(OwnedFrame::from_raw(frame)) };
+
+    Ok(())
+}
+
+pub fn sys_as_create(out_handle: usize) -> Result<(), Status> {
+    if out_handle == 0 {
+        return Err(Status::InvalidArgument);
+    }
+
+    let task_id = crate::task::scheduler::current();
+    let task = crate::task::scheduler::get_task_mut(task_id).ok_or(Status::NoSuchTask)?;
+
+    let new_as = match crate::memory::with_address_space(task.as_id, |caller_as| {
+        crate::memory::with_allocator(|allocator| caller_as.new_user(allocator))
+    }) {
+        Some(Ok(as_space)) => as_space,
+        _ => return Err(Status::OutOfMemory),
+    };
+
+    let as_id = crate::memory::insert_address_space(new_as).ok_or(Status::OutOfMemory)?;
+
+    let handle = Handle {
+        object: KernelObject::AddressSpace(as_id),
+        rights: Rights::READ | Rights::WRITE | Rights::EXECUTE,
+    };
+
+    let handle_id = match task.handles.push(handle) {
+        Some(id) => id,
+        None => {
+            crate::memory::remove_address_space(as_id);
+            return Err(Status::OutOfMemory);
+        }
+    };
+
+    copy_val_to_user(VirtualAddr::new(out_handle), &handle_id)?;
+
+    Ok(())
+}
+
+pub fn sys_map(
+    as_handle: usize,
+    frame_handle: usize,
+    virtual_addr: usize,
+    permissions: usize,
+) -> Result<(), Status> {
+    if virtual_addr % FRAME_SIZE != 0 {
+        return Err(Status::InvalidArgument);
+    }
+
+    if virtual_addr >= USER_SPACE_END.as_usize() {
+        return Err(Status::InvalidArgument);
+    }
+
+    let task = crate::task::scheduler::current();
+    let task = crate::task::scheduler::get_task_mut(task).ok_or(Status::NoSuchTask)?;
+
+    let as_handle = task.handles.get(as_handle).ok_or(Status::BadHandle)?;
+    let as_id = match as_handle.object {
+        KernelObject::AddressSpace(as_id) => as_id,
+        _ => return Err(Status::InvalidArgument),
+    };
+
+    let frame_handle = task.handles.get(frame_handle).ok_or(Status::BadHandle)?;
+    let frame = match frame_handle.object {
+        KernelObject::Frame(frame_addr) => frame_addr,
+        _ => return Err(Status::InvalidArgument),
+    };
+
+    let virtual_addr = VirtualAddr::new(virtual_addr);
+    let permissions = PagePermissions::new(
+        permissions & (1 << 0) != 0,
+        permissions & (1 << 1) != 0,
+        true,
+    );
+
+    let map_result = crate::memory::with_address_space_mut(as_id, |target_as| {
+        crate::memory::with_allocator(|allocator| {
+            target_as.map(
+                frame.start_address(),
+                virtual_addr,
+                permissions,
+                allocator,
+                crate::memory::CachePolicy::WriteBack,
+            )
+        })
+    })
+    .ok_or(Status::BadHandle)?;
+
+    map_result.map_err(|_| Status::OutOfMemory)?;
+
+    Ok(())
+}
+
+pub fn sys_unmap(as_handle: usize, virtual_addr: usize) -> Result<(), Status> {
+    if virtual_addr % FRAME_SIZE != 0 {
+        return Err(Status::InvalidArgument);
+    }
+
+    if virtual_addr >= USER_SPACE_END.as_usize() {
+        return Err(Status::InvalidArgument);
+    }
+
+    let task = crate::task::scheduler::current();
+    let task = crate::task::scheduler::get_task_mut(task).ok_or(Status::NoSuchTask)?;
+
+    let as_handle = task.handles.get(as_handle).ok_or(Status::BadHandle)?;
+    let as_id = match as_handle.object {
+        KernelObject::AddressSpace(as_id) => as_id,
+        _ => return Err(Status::InvalidArgument),
+    };
+
+    let virtual_addr = VirtualAddr::new(virtual_addr);
+
+    let map_result = crate::memory::with_address_space_mut(as_id, |target_as| {
+        if target_as.to_physical(virtual_addr).is_none() {
+            return Err(Status::InvalidArgument);
+        }
+
+        crate::memory::with_allocator(|allocator| unsafe {
+            target_as.unmap(virtual_addr, allocator)
+        })
+        .map_err(|_| Status::BadAddress)
+    })
+    .ok_or(Status::BadHandle)?;
+
+    map_result.map_err(|_| Status::OutOfMemory)?;
+
+    Ok(())
+}
+
+pub fn sys_task_create(
+    as_handle: usize,
+    entry: usize,
+    user_stack: usize,
+    out_task_handle: usize,
+) -> Result<(), Status> {
+    if out_task_handle == 0 || entry == 0 || user_stack == 0 {
+        return Err(Status::InvalidArgument);
+    }
+
+    if entry >= 0x0000_8000_0000_0000 || user_stack >= 0x0000_8000_0000_0000 {
+        return Err(Status::BadAddress);
+    }
+
+    let task_id = crate::task::scheduler::current();
+    let task = crate::task::scheduler::get_task_mut(task_id).ok_or(Status::NoSuchTask)?;
+
+    let as_handle = task.handles.get(as_handle).ok_or(Status::BadHandle)?;
+    let as_id = match as_handle.object {
+        KernelObject::AddressSpace(as_id) => as_id,
+        _ => return Err(Status::InvalidArgument),
+    };
+
+    if as_handle.rights.0 & Rights::EXECUTE.0 == 0 {
+        return Err(Status::InvalidArgument);
+    }
+
+    if crate::memory::with_address_space(as_id, |_| ()).is_none() {
+        return Err(Status::BadHandle);
+    }
+
+    let kernel_stack = match crate::memory::with_kernel_address_space(|kernel_as| {
+        crate::memory::with_allocator(|allocator| {
+            crate::task::scheduler::allocate_kernel_stack(kernel_as, allocator)
+        })
+    }) {
+        Ok(stack) => stack,
+        Err(err) => {
+            println!("Failed to allocate kernel stack: {:?}", err);
+            return Err(Status::OutOfMemory);
+        }
+    };
+
+    let new_tcb = crate::task::tcb::Tcb::new_user(
+        0, // assigned by scheduler::add_task
+        as_id,
+        kernel_stack,
+        VirtualAddr::new(entry),
+        VirtualAddr::new(user_stack),
+    );
+
+    let new_task_id = match crate::task::scheduler::add_task(new_tcb) {
+        Ok(id) => id,
+        Err(_) => return Err(Status::OutOfMemory),
+    };
+
+    let handle = Handle {
+        object: KernelObject::Thread(new_task_id),
+        rights: Rights::READ | Rights::WRITE | Rights::EXECUTE,
+    };
+
+    let handle_id = match task.handles.push(handle) {
+        Some(id) => id,
+        None => {
+            crate::task::scheduler::remove_task(new_task_id);
+            return Err(Status::OutOfMemory);
+        }
+    };
+
+    copy_val_to_user(VirtualAddr::new(out_task_handle), &handle_id)?;
 
     Ok(())
 }

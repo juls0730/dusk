@@ -103,7 +103,7 @@ pub enum CpuFeaturesError {
     InvalidVirtualAddressWidth,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) struct CpuFeatures {
     pub nx_supported: bool,
     pub nx_enabled: bool,

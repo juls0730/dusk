@@ -6,8 +6,15 @@ mod user;
 use core::ops::Add;
 
 #[allow(unused)]
-pub use address_space::{AddressSpace, AddressSpaceCreateError, MapError, UnmapError};
-pub use frame::{FRAME_SIZE, FrameAddr, FrameAllocator, OwnedFrame};
+pub use address_space::{
+    AddressSpace, AddressSpaceCreateError, MapError, UnmapError, init_kernel_address_space,
+    insert_address_space, remove_address_space, with_address_space, with_address_space_mut,
+    with_kernel_address_space,
+};
+pub use frame::{
+    FRAME_SIZE, FrameAddr, FrameAllocator, OwnedFrame, alloc_frame, dealloc_frame,
+    init_global as init_frame_allocator, with_allocator,
+};
 #[allow(unused)]
 pub use stack::{KernelStack, KernelStackPool, StackCreateError, UserStack};
 #[allow(unused)]
@@ -31,8 +38,6 @@ impl<const N: usize> BootString<N> {
     }
 }
 
-const MAX_MODULE_PATH_LENGTH: usize = 256;
-
 pub struct InitramfsImage {
     pub start: VirtualAddr,
     pub length: usize,
@@ -55,7 +60,7 @@ pub struct KernelMemoryLayout {
     pub segments: [KernelSegment; 3],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PagePermissions {
     pub writable: bool,
     pub executable: bool,
@@ -117,7 +122,7 @@ impl Add<usize> for VirtualAddr {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MemoryRegionKind {
     Usable,
     Reserved,
@@ -130,20 +135,20 @@ pub enum MemoryRegionKind {
     MappedReserved,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub enum CachePolicy {
     Uncacheable,
     WriteBack,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct MemoryRegion {
     pub start: PhysicalAddr,
     pub length: usize,
     pub kind: MemoryRegionKind,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct DirectMap {
     offset: usize,
 }

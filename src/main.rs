@@ -14,7 +14,7 @@ mod task;
 
 use crate::{
     debug::serial,
-    memory::{AddressSpace, KernelStackPool, MemoryRegionKind},
+    memory::{AddressSpace, MemoryRegionKind, init_frame_allocator, init_kernel_address_space},
 };
 
 pub struct KernelHandoff {
@@ -22,7 +22,6 @@ pub struct KernelHandoff {
     address_space: AddressSpace,
     direct_map: memory::DirectMap,
     boot_info: boot::BootInfo,
-    kernel_stack_pool: KernelStackPool,
     handoff_frame: memory::OwnedFrame,
 }
 
@@ -51,11 +50,9 @@ pub extern "C" fn _start() -> ! {
 
     println!("Entering kernel main...");
 
-    let mut kernel_stack_pool = KernelStackPool::new();
-
-    let kernel_stack = kernel_stack_pool
-        .allocate(&mut address_space, &mut allocator)
-        .expect("failed to allocate bootstrap stack");
+    let kernel_stack =
+        crate::task::scheduler::allocate_kernel_stack(&mut address_space, &mut allocator)
+            .expect("failed to allocate bootstrap stack");
 
     let handoff_frame = allocator
         .alloc()
@@ -70,7 +67,6 @@ pub extern "C" fn _start() -> ! {
         address_space,
         direct_map,
         boot_info,
-        kernel_stack_pool,
         handoff_frame,
     };
 
@@ -88,21 +84,13 @@ pub extern "C" fn _start() -> ! {
 }
 
 pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
-    let (
-        mut allocator,
-        mut address_space,
-        direct_map,
-        boot_info,
-        mut kernel_stack_pool,
-        handoff_frame,
-    ) = unsafe {
+    let (mut allocator, mut address_space, direct_map, boot_info, handoff_frame) = unsafe {
         let handoff = handoff.read();
         (
             handoff.allocator,
             handoff.address_space,
             handoff.direct_map,
             handoff.boot_info,
-            handoff.kernel_stack_pool,
             handoff.handoff_frame,
         )
     };
@@ -129,27 +117,20 @@ pub unsafe extern "C" fn kernel_main(handoff: *mut KernelHandoff) -> ! {
 
     println!("Initializing interrupt controller...");
 
-    let interrupt_controller =
+    let _interrupt_controller =
         arch::init_interrupt_controller(&madt, &mut allocator, &mut address_space)
             .expect("failed to initialize interrupt controller");
 
     task::bootstrap::spawn(
         "omega3.elf",
-        boot_info.initramfs.data(),
+        &boot_info.initramfs,
         &mut address_space,
         &mut allocator,
         direct_map,
-        &mut kernel_stack_pool,
     );
 
-    task::bootstrap::spawn(
-        "client.elf",
-        boot_info.initramfs.data(),
-        &mut address_space,
-        &mut allocator,
-        direct_map,
-        &mut kernel_stack_pool,
-    );
+    init_frame_allocator(allocator);
+    init_kernel_address_space(address_space);
 
     task::scheduler::start();
 }

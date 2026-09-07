@@ -15,7 +15,6 @@ const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 const RFLAGS_MASK: u64 = 0x257FD5; // Clear IF, TF, DF, IOPL, NT, AC
 
 #[repr(C)]
-#[derive(Debug)]
 struct SyscallFrame {
     pub r15: u64,
     pub r14: u64,

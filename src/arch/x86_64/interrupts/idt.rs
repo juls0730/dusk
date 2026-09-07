@@ -37,7 +37,7 @@ struct IdtPointer {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(super) struct InterruptStackFrame {
     pub instruction_pointer: VirtualAddr,
     pub code_segment: u64,
