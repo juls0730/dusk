@@ -344,7 +344,7 @@ pub fn yield_current() {
     crate::arch::restore_interrupts(interrupt_state);
 }
 
-pub fn exit_current(exit_code: usize) -> ! {
+pub fn exit_current(reason: ExitReason) -> ! {
     crate::arch::disable_interrupts();
 
     let switch = {
@@ -356,7 +356,7 @@ pub fn exit_current(exit_code: usize) -> ! {
         };
 
         let current = scheduler.tasks[current_id.0].as_mut().unwrap();
-        current.state = ThreadState::Dead(ExitReason::Exited(exit_code));
+        current.state = ThreadState::Dead(reason);
 
         scheduler.tasks[next_id.0].as_mut().unwrap().state = ThreadState::Running;
         scheduler.current = Some(next_id);

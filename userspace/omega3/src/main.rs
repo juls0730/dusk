@@ -40,9 +40,9 @@ pub extern "C" fn _start() -> ! {
     map_stack(client_as, STACK_TOP, STACK_PAGES);
     let _ = sys_task_create(client_as, client_entry, STACK_TOP).unwrap();
 
-    let ptr = 0xDEAD_BEEF as *mut u32;
+    // call a bogus system call
     unsafe {
-        core::ptr::write_volatile(&mut *ptr, 0xDEAD_BEEF);
+        core::arch::asm!("syscall", in("rax") 134);
     }
 
     sys_exit(0);

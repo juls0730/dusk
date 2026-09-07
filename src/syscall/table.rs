@@ -6,7 +6,7 @@ use crate::{
     println,
     task::{
         scheduler::TaskId,
-        tcb::{BlockReason, Handle, KernelObject, MAX_MSG_SIZE, Message, Rights},
+        tcb::{BlockReason, ExitReason, Handle, KernelObject, MAX_MSG_SIZE, Message, Rights},
     },
 };
 
@@ -18,7 +18,7 @@ pub fn sys_yield() -> Result<(), Status> {
 }
 
 pub fn sys_exit(exit_code: usize) -> ! {
-    crate::task::scheduler::exit_current(exit_code);
+    crate::task::scheduler::exit_current(ExitReason::Exited(exit_code));
 }
 
 pub fn sys_write(fd: usize, buf_ptr: usize, len: usize, out_ptr: usize) -> Result<(), Status> {

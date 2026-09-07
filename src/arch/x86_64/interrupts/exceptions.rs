@@ -1,7 +1,10 @@
 use core::arch::asm;
 
 use super::idt::{self, InterruptFrame, InterruptStackFrame, stub_err, stub_no_err};
-use crate::{hcf, println};
+use crate::{
+    hcf, println,
+    task::tcb::{ExitReason, Fault},
+};
 
 stub_no_err!(stub_divide_error, 0);
 stub_no_err!(stub_debug, 1);
@@ -21,46 +24,71 @@ stub_no_err!(stub_machine_check, 18);
 stub_no_err!(stub_simd_floating_point, 19);
 stub_no_err!(stub_user_test_exit, 0x80);
 
+const EXCEPTION_NAMES: [&str; 32] = [
+    "DIVIDE ERROR",
+    "DEBUG",
+    "NON-MASKABLE INTERRUPT",
+    "BREAKPOINT",
+    "OVERFLOW",
+    "BOUND RANGE EXCEEDED",
+    "INVALID OPCODE",
+    "DEVICE NOT AVAILABLE",
+    "DOUBLE FAULT",
+    "COPROCESSOR SEGMENT OVERRUN",
+    "INVALID TSS",
+    "SEGMENT NOT PRESENT",
+    "STACK-SEGMENT FAULT",
+    "GENERAL PROTECTION FAULT",
+    "PAGE FAULT",
+    "RESERVED",
+    "x87 FLOATING-POINT EXCEPTION",
+    "ALIGNMENT CHECK",
+    "MACHINE CHECK",
+    "SIMD FLOATING-POINT EXCEPTION",
+    "VIRTUALIZATION EXCEPTION",
+    "CONTROL PROTECTION EXCEPTION",
+    "RESERVED",
+    "RESERVED",
+    "RESERVED",
+    "RESERVED",
+    "RESERVED",
+    "RESERVED",
+    "HYPERVISOR INJECTION EXCEPTION",
+    "VMM COMMUNICATION EXCEPTION",
+    "SECURITY EXCEPTION",
+    "RESERVED",
+];
+
 pub(super) fn handle(frame: &mut InterruptFrame) {
-    match frame.vector as u8 {
-        0 => fatal_exception("DIVIDE ERROR", &frame.stack_frame, None),
-        1 => fatal_exception("DEBUG EXCEPTION", &frame.stack_frame, None),
-        2 => fatal_exception("NON-MASKABLE INTERRUPT", &frame.stack_frame, None),
-        3 => report_exception("BREAKPOINT", &frame.stack_frame, None),
-        6 => fatal_exception("INVALID OPCODE", &frame.stack_frame, None),
-        7 => fatal_exception("DEVICE NOT AVAILABLE", &frame.stack_frame, None),
-        8 => fatal_exception("DOUBLE FAULT", &frame.stack_frame, Some(frame.error_code)),
-        10 => fatal_exception("INVALID TSS", &frame.stack_frame, Some(frame.error_code)),
-        11 => fatal_exception("SEGMENT NOT PRESENT", &frame.stack_frame, Some(frame.error_code)),
-        12 => fatal_exception("STACK-SEGMENT FAULT", &frame.stack_frame, Some(frame.error_code)),
-        13 => fatal_exception(
-            "GENERAL PROTECTION FAULT",
-            &frame.stack_frame,
-            Some(frame.error_code),
-        ),
-        14 => {
-            report_exception("PAGE FAULT", &frame.stack_frame, Some(frame.error_code));
+    let is_user = frame.stack_frame.code_segment & 0b11 == 3;
+    let vector = frame.vector as u8;
+    let name = EXCEPTION_NAMES
+        .get(vector as usize)
+        .copied()
+        .unwrap_or("UNKNOWN EXCEPTION");
+
+    if !is_user {
+        if vector == 14 {
+            report_exception(name, &frame.stack_frame, Some(frame.error_code));
             println!("Faulting address: {:#X}", read_cr2());
             print_page_fault_error(frame.error_code);
             hcf();
         }
-        16 => fatal_exception("X87 FLOATING-POINT EXCEPTION", &frame.stack_frame, None),
-        17 => fatal_exception("ALIGNMENT CHECK", &frame.stack_frame, Some(frame.error_code)),
-        18 => fatal_exception("MACHINE CHECK", &frame.stack_frame, None),
-        19 => fatal_exception("SIMD FLOATING-POINT EXCEPTION", &frame.stack_frame, None),
-        0x80 => {
-            if frame.stack_frame.code_segment & 0b11 != 3 {
-                panic!("user_test_exit_handler called from kernel");
-            }
 
-            println!("User test exit");
-            hcf();
-        }
-        _ => {
-            println!("Unhandled exception vector: {:#X}", frame.vector);
-            hcf();
-        }
+        fatal_exception(name, &frame.stack_frame, Some(frame.error_code));
     }
+
+    let fault = match vector {
+        // Page fault, GPF, Stack/Segment faults -> SegmentationFault
+        11 | 12 | 13 | 14 => Fault::SegmentationFault,
+        // Invalid Opcode -> IllegalInstruction
+        6 => Fault::IllegalInstruction,
+        // Divide by zero, Alignment check, SIMD/x87 -> Abort
+        0 | 16 | 17 | 19 => Fault::Abort,
+        _ => Fault::Abort,
+    };
+
+    crate::task::scheduler::exit_current(ExitReason::Fault(fault));
 }
 
 pub(super) fn install(idt: &mut idt::Idt) {

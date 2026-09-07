@@ -2,6 +2,8 @@ mod table;
 
 use table::*;
 
+use crate::task::tcb::{ExitReason, Fault};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
 pub enum Status {
@@ -31,7 +33,7 @@ pub enum SyscallNumber {
 }
 
 impl TryFrom<u64> for SyscallNumber {
-    type Error = Status;
+    type Error = ();
     fn try_from(val: u64) -> Result<Self, Self::Error> {
         match val {
             1 => Ok(Self::Yield),
@@ -45,14 +47,17 @@ impl TryFrom<u64> for SyscallNumber {
             9 => Ok(Self::Map),
             10 => Ok(Self::Unmap),
             11 => Ok(Self::TaskCreate),
-            _ => Err(Status::InvalidArgument),
+            _ => Err(()),
         }
     }
 }
 
 pub fn handle(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, _arg5: u64) -> u64 {
     let result = (|| -> Result<(), Status> {
-        let syscall = SyscallNumber::try_from(num)?;
+        let syscall = SyscallNumber::try_from(num).unwrap_or_else(|_| {
+            crate::task::scheduler::exit_current(ExitReason::Fault(Fault::BadSystemCall))
+        });
+
         match syscall {
             SyscallNumber::Yield => sys_yield(),
             SyscallNumber::Exit => sys_exit(arg0 as usize),
