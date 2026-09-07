@@ -4,7 +4,7 @@ use crate::{
         self, AddressSpace, DirectMap, FRAME_SIZE, FrameAllocator, InitramfsImage, PagePermissions,
         UserStack, VirtualAddr,
     },
-    task::tcb::Tcb,
+    task::{scheduler::TaskId, tcb::Tcb},
 };
 
 pub fn spawn(
@@ -13,7 +13,7 @@ pub fn spawn(
     kernel_as: &mut AddressSpace,
     allocator: &mut FrameAllocator,
     direct_map: DirectMap,
-) -> usize {
+) -> TaskId {
     let bytes = format::cpio::find_file(initramfs.data(), name)
         .unwrap_or_else(|| panic!("{name} missing from initramfs"));
     let kernel_stack = crate::task::scheduler::allocate_kernel_stack(kernel_as, allocator)
@@ -41,10 +41,14 @@ pub fn spawn(
 
     let entry = load_elf(bytes, &mut address_space, allocator, direct_map).expect("invalid ELF");
 
-    let as_id =
-        crate::memory::insert_address_space(address_space).expect("address space table is full");
+    let as_id = match crate::memory::insert_address_space(address_space) {
+        Ok(id) => id,
+        Err(_) => {
+            panic!("address space table is full");
+        }
+    };
 
-    let task = Tcb::new_user(0, as_id, kernel_stack, entry, user_stack.top());
+    let task = Tcb::new_user(as_id, kernel_stack, entry, user_stack.top());
     crate::task::scheduler::add_task(task).expect("scheduler is full")
 }
 

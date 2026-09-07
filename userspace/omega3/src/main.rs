@@ -5,8 +5,8 @@ mod cpio;
 mod elf;
 
 use dusk_sys::{
-    Handle, SELF_AS, println, sys_as_create, sys_exit, sys_frame_alloc, sys_map, sys_task_create,
-    sys_unmap, sys_yield,
+    AddressSpaceHandle, SELF_AS, println, sys_as_create, sys_exit, sys_frame_alloc, sys_map,
+    sys_task_create, sys_unmap, sys_yield,
 };
 
 // Mapped into the root task's address space by the kernel.
@@ -40,10 +40,15 @@ pub extern "C" fn _start() -> ! {
     map_stack(client_as, STACK_TOP, STACK_PAGES);
     let _ = sys_task_create(client_as, client_entry, STACK_TOP).unwrap();
 
+    let ptr = 0xDEAD_BEEF as *mut u32;
+    unsafe {
+        core::ptr::write_volatile(&mut *ptr, 0xDEAD_BEEF);
+    }
+
     sys_exit(0);
 }
 
-fn load_elf(elf: &elf::Elf, target_as: Handle) -> usize {
+fn load_elf(elf: &elf::Elf, target_as: AddressSpaceHandle) -> usize {
     for header in elf.program_headers().unwrap() {
         let header = header.unwrap();
         if header.segment_type != elf::ProgramHeaderType::Load || header.memory_size == 0 {
@@ -66,7 +71,7 @@ fn load_elf(elf: &elf::Elf, target_as: Handle) -> usize {
         for page in (page_start..segment_end).step_by(0x1000) {
             let frame = sys_frame_alloc().unwrap();
 
-            sys_map(SELF_AS, frame, SCRATCH_PAGE, 0b01).unwrap();
+            let scratch_handle = sys_map(SELF_AS, frame, SCRATCH_PAGE, 0b01).unwrap();
             unsafe {
                 core::ptr::write_bytes(SCRATCH_PAGE as *mut u8, 0, 0x1000);
 
@@ -84,7 +89,7 @@ fn load_elf(elf: &elf::Elf, target_as: Handle) -> usize {
                     );
                 }
             }
-            sys_unmap(SELF_AS, SCRATCH_PAGE).unwrap();
+            sys_unmap(scratch_handle).unwrap();
 
             sys_map(target_as, frame, page, perms).unwrap();
         }
@@ -93,7 +98,7 @@ fn load_elf(elf: &elf::Elf, target_as: Handle) -> usize {
     elf.entry()
 }
 
-fn map_stack(target_as: Handle, stack_top: usize, pages: usize) {
+fn map_stack(target_as: AddressSpaceHandle, stack_top: usize, pages: usize) {
     for i in 1..=pages {
         let frame = sys_frame_alloc().unwrap();
         let page_addr = stack_top - i * 0x1000;

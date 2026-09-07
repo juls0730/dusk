@@ -5,14 +5,14 @@ use dusk_sys::{println, sys_exit, sys_recv, sys_send};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let out = [0u8; 128];
+    let mut out = [0u8; 128];
     loop {
-        let (actual_len, sender) = sys_recv(out.as_ptr() as usize, out.len()).unwrap();
+        let (actual_len, sender) = sys_recv(&mut out).unwrap();
         println!(
             "[echo] Received: {}",
             core::str::from_utf8(&out[..actual_len]).unwrap()
         );
-        sys_send(sender, out.as_ptr() as usize, actual_len).unwrap();
+        sys_send(sender, &out[..actual_len]).unwrap();
     }
 }
 

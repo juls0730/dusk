@@ -2,22 +2,29 @@ use core::ops::BitOr;
 
 use crate::{
     arch::ThreadContext,
-    memory::{FrameAddr, KernelStack, VirtualAddr},
+    memory::{AddressSpaceId, KernelStack, OwnedFrame, VirtualAddr},
+    task::scheduler::TaskId,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    SegmentationFault,
+    IllegalInstruction,
+    Abort,
+    BadSystemCall,
+}
 
 // Thread Control Block
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitReason {
     Exited(usize),
     Killed,
-    Fault,
+    Fault(Fault),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockReason {
-    Send { ep: usize },
-    Recv { ep: usize },
-    Reply { client: usize },
+    Recv,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +40,7 @@ pub const MAILBOX_CAPACITY: usize = 4;
 
 #[derive(Clone, Copy)]
 pub struct Message {
-    pub sender: usize,
+    pub sender: TaskId,
     pub length: usize,
     pub data: [u8; MAX_MSG_SIZE],
 }
@@ -79,9 +86,14 @@ impl Mailbox {
 const MAX_HANDLES: usize = 32;
 
 pub enum KernelObject {
-    AddressSpace(usize),
-    Frame(FrameAddr),
-    Thread(usize),
+    AddressSpace(AddressSpaceId),
+    Frame(OwnedFrame),
+    Mapping {
+        frame: OwnedFrame,
+        address_space: AddressSpaceId,
+        virtual_addr: VirtualAddr,
+    },
+    Thread(TaskId),
 }
 
 pub struct Handle {
@@ -118,15 +130,36 @@ impl HandleTable {
         }
     }
 
-    pub fn push(&mut self, handle: Handle) -> Option<usize> {
+    pub fn push(&mut self, handle: Handle) -> Result<usize, Handle> {
         for (i, slot) in self.handles.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(handle);
-                return Some(i);
+                return Ok(i);
             }
         }
 
-        None
+        Err(handle)
+    }
+
+    pub fn remove(&mut self, id: usize) -> Option<Handle> {
+        self.handles.get_mut(id).and_then(Option::take)
+    }
+
+    pub fn take(&mut self, id: usize) -> Option<Handle> {
+        self.handles.get_mut(id)?.take()
+    }
+
+    pub fn put(&mut self, id: usize, handle: Handle) -> Result<(), Handle> {
+        let Some(slot) = self.handles.get_mut(id) else {
+            return Err(handle);
+        };
+
+        if slot.is_some() {
+            return Err(handle);
+        }
+
+        *slot = Some(handle);
+        Ok(())
     }
 
     pub fn get(&self, id: usize) -> Option<&Handle> {
@@ -139,8 +172,8 @@ impl HandleTable {
 }
 
 pub struct Tcb {
-    pub id: usize,
-    pub as_id: usize,
+    pub id: TaskId,
+    pub as_id: AddressSpaceId,
     pub state: ThreadState,
     pub kernel_stack: KernelStack,
     pub context: ThreadContext,
@@ -161,21 +194,23 @@ impl core::fmt::Debug for Tcb {
 
 impl Tcb {
     pub fn new_user(
-        id: usize,
-        as_id: usize,
+        as_id: AddressSpaceId,
         kernel_stack: KernelStack,
         entry: VirtualAddr,
         user_stack: VirtualAddr,
     ) -> Self {
         let context = ThreadContext::new(entry, user_stack, kernel_stack.top());
         let mut handles = HandleTable::new();
-        handles.push(Handle {
+        match handles.push(Handle {
             object: KernelObject::AddressSpace(as_id),
             rights: Rights::READ | Rights::WRITE | Rights::EXECUTE,
-        });
+        }) {
+            Ok(_) => {}
+            Err(_) => unreachable!("Cant push root address space handle"),
+        };
 
         Self {
-            id,
+            id: TaskId::new(0),
             as_id,
             state: ThreadState::Ready,
             kernel_stack,

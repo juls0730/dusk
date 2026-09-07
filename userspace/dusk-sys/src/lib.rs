@@ -10,15 +10,25 @@ pub enum Status {
     BadFileDescriptor = 3,
     NoSuchTask = 4,
     OutOfMemory = 5,
+    BadHandle = 6,
 }
 
 // Opaque handle type
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Handle(usize);
+pub struct AddressSpaceHandle(usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameHandle(usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MappingHandle(usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadHandle(usize);
 
 // our own address space and thread handle are always given to us
-pub const SELF_AS: Handle = Handle(0);
-pub const SELF_THREAD: Handle = Handle(1);
+pub const SELF_AS: AddressSpaceHandle = AddressSpaceHandle(0);
+pub const SELF_THREAD: ThreadHandle = ThreadHandle(1);
 
 impl From<usize> for Status {
     fn from(value: usize) -> Self {
@@ -28,6 +38,7 @@ impl From<usize> for Status {
             3 => Self::BadFileDescriptor,
             4 => Self::NoSuchTask,
             5 => Self::OutOfMemory,
+            6 => Self::BadHandle,
             _ => Self::InvalidArgument,
         }
     }
@@ -125,15 +136,15 @@ pub fn sys_exit(exit_code: usize) -> ! {
     }
 }
 
-pub fn sys_send(dest_task_id: usize, msg_ptr: usize, len: usize) -> Result<(), Status> {
+pub fn sys_send(dest_task_id: usize, msg: &[u8]) -> Result<(), Status> {
     unsafe {
         let status: usize;
 
         asm!(
             "syscall",
             in("rdi") dest_task_id,
-            in("rsi") msg_ptr,
-            in("rdx") len,
+            in("rsi") msg.as_ptr(),
+            in("rdx") msg.len(),
             inlateout("rax") SyscallNumber::Send as usize => status,
             lateout("rcx") _,
             lateout("r11") _,
@@ -147,7 +158,7 @@ pub fn sys_send(dest_task_id: usize, msg_ptr: usize, len: usize) -> Result<(), S
     }
 }
 
-pub fn sys_recv(buf_ptr: usize, max_len: usize) -> Result<(usize, usize), Status> {
+pub fn sys_recv(buf: &mut [u8]) -> Result<(usize, usize), Status> {
     let mut actual_len: usize = 0;
     let mut sender: usize = 0;
 
@@ -156,8 +167,8 @@ pub fn sys_recv(buf_ptr: usize, max_len: usize) -> Result<(usize, usize), Status
 
         asm!(
             "syscall",
-            in("rdi") buf_ptr,
-            in("rsi") max_len,
+            in("rdi") buf.as_mut_ptr(),
+            in("rsi") buf.len(),
             in("rdx") &raw mut actual_len as usize,
             in("r10") &raw mut sender as usize,
             inlateout("rax") SyscallNumber::Recv as usize => status,
@@ -173,7 +184,7 @@ pub fn sys_recv(buf_ptr: usize, max_len: usize) -> Result<(usize, usize), Status
     }
 }
 
-pub fn sys_frame_alloc() -> Result<Handle, Status> {
+pub fn sys_frame_alloc() -> Result<FrameHandle, Status> {
     let mut handle: usize = 0;
     unsafe {
         let status: usize;
@@ -189,12 +200,12 @@ pub fn sys_frame_alloc() -> Result<Handle, Status> {
         if status != 0 {
             Err(status.into())
         } else {
-            Ok(Handle(handle))
+            Ok(FrameHandle(handle))
         }
     }
 }
 
-pub fn sys_frame_dealloc(frame_handle: Handle) -> Result<(), Status> {
+pub fn sys_frame_dealloc(frame_handle: FrameHandle) -> Result<(), Status> {
     unsafe {
         let status: usize;
 
@@ -214,7 +225,7 @@ pub fn sys_frame_dealloc(frame_handle: Handle) -> Result<(), Status> {
     }
 }
 
-pub fn sys_as_create() -> Result<Handle, Status> {
+pub fn sys_as_create() -> Result<AddressSpaceHandle, Status> {
     let mut handle: usize = 0;
     unsafe {
         let status: usize;
@@ -230,17 +241,19 @@ pub fn sys_as_create() -> Result<Handle, Status> {
         if status != 0 {
             Err(status.into())
         } else {
-            Ok(Handle(handle))
+            Ok(AddressSpaceHandle(handle))
         }
     }
 }
 
 pub fn sys_map(
-    as_handle: Handle,
-    frame_handle: Handle,
+    as_handle: AddressSpaceHandle,
+    frame_handle: FrameHandle,
     virtual_addr: usize,
     permissions: usize,
-) -> Result<(), Status> {
+) -> Result<MappingHandle, Status> {
+    let mut handle: usize = 0;
+
     unsafe {
         let status: usize;
 
@@ -250,6 +263,7 @@ pub fn sys_map(
             in("rsi") frame_handle.0,
             in("rdx") virtual_addr,
             in("r10") permissions,
+            in("r8") &raw mut handle as usize,
             inlateout("rax") SyscallNumber::Map as usize => status,
             lateout("rcx") _,
             lateout("r11") _,
@@ -258,19 +272,18 @@ pub fn sys_map(
         if status != 0 {
             Err(status.into())
         } else {
-            Ok(())
+            Ok(MappingHandle(handle))
         }
     }
 }
 
-pub fn sys_unmap(as_handle: Handle, virtual_addr: usize) -> Result<(), Status> {
+pub fn sys_unmap(mapping_handle: MappingHandle) -> Result<(), Status> {
     unsafe {
         let status: usize;
 
         asm!(
             "syscall",
-            in("rdi") as_handle.0,
-            in("rsi") virtual_addr,
+            in("rdi") mapping_handle.0,
             inlateout("rax") SyscallNumber::Unmap as usize => status,
             lateout("rcx") _,
             lateout("r11") _,
@@ -285,10 +298,10 @@ pub fn sys_unmap(as_handle: Handle, virtual_addr: usize) -> Result<(), Status> {
 }
 
 pub fn sys_task_create(
-    as_handle: Handle,
+    as_handle: AddressSpaceHandle,
     entry: usize,
     user_stack: usize,
-) -> Result<Handle, Status> {
+) -> Result<ThreadHandle, Status> {
     let mut handle: usize = 0;
 
     unsafe {
@@ -308,7 +321,7 @@ pub fn sys_task_create(
         if status != 0 {
             Err(status.into())
         } else {
-            Ok(Handle(handle))
+            Ok(ThreadHandle(handle))
         }
     }
 }

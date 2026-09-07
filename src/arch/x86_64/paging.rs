@@ -4,7 +4,7 @@ use crate::{
     arch::x86_64::cpu::CpuFeatures,
     memory::{
         CachePolicy, DirectMap, FrameAddr, FrameAllocator, OwnedFrame, PagePermissions,
-        PhysicalAddr, VirtualAddr,
+        PageTableMapping, PhysicalAddr, VirtualAddr,
     },
 };
 
@@ -199,6 +199,14 @@ impl PageTableEntry {
         self.0 & Self::PRESENT != 0
     }
 
+    fn writable(&self) -> bool {
+        self.0 & Self::WRITABLE != 0
+    }
+
+    fn executable(&self) -> bool {
+        self.0 & Self::NX == 0
+    }
+
     fn is_user_accessible(&self) -> bool {
         self.0 & Self::USER_ACCESSIBLE != 0
     }
@@ -225,6 +233,14 @@ impl PageTableEntry {
         }
 
         FrameAddr::from_start_address(self.physical_address(config))
+    }
+
+    fn permissions(&self) -> PagePermissions {
+        PagePermissions::new(
+            self.writable(),
+            self.executable(),
+            self.is_user_accessible(),
+        )
     }
 }
 
@@ -361,6 +377,52 @@ impl PageTable {
 
     pub fn to_virtual(&self, addr: PhysicalAddr) -> Option<VirtualAddr> {
         self.direct_map.translate(addr)
+    }
+
+    pub fn mapping(&self, virtual_addr: VirtualAddr) -> Option<PageTableMapping> {
+        let address = virtual_addr.as_usize();
+
+        if !self.is_canonical(address) {
+            return None;
+        }
+
+        let mut table_frame = self.frame.frame_address();
+        let mut permissions = PagePermissions::new(true, true, true);
+
+        for &level in self.config.mode.intermediate_levels() {
+            let table = self.table(table_frame)?;
+            let entry = table[level.index(address)];
+
+            if !entry.is_present() {
+                return None;
+            }
+
+            let entry_permissions = entry.permissions();
+            permissions.writable &= entry_permissions.writable;
+            permissions.user_accessible &= entry_permissions.user_accessible;
+            permissions.executable &= entry_permissions.executable;
+
+            if entry.is_huge() {
+                level.large_page_size()?;
+                return Some(PageTableMapping { permissions });
+            }
+
+            table_frame = entry.table_frame(self.config)?;
+        }
+
+        let page_table = self.table(table_frame)?;
+        let entry = page_table[p1_index(address)];
+
+        if !entry.is_present() {
+            return None;
+        }
+
+        let entry_permissions = entry.permissions();
+        permissions.writable &= entry_permissions.writable;
+        permissions.user_accessible &= entry_permissions.user_accessible;
+        permissions.executable &= entry_permissions.executable;
+
+        Some(PageTableMapping { permissions })
     }
 
     fn get_next_level(

@@ -3,7 +3,8 @@ use core::cell::UnsafeCell;
 use crate::{
     arch::ThreadContext,
     memory::{
-        AddressSpace, FrameAllocator, KernelStack, KernelStackPool, StackCreateError, VirtualAddr,
+        AddressSpace, AddressSpaceId, FrameAllocator, KernelStack, KernelStackPool,
+        StackCreateError, VirtualAddr,
     },
     println,
     task::tcb::{BlockReason, ExitReason, Handle, KernelObject, Rights, Tcb, ThreadState},
@@ -11,7 +12,15 @@ use crate::{
 
 const MAX_TASKS: usize = 32;
 
-type TaskId = usize;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct TaskId(usize);
+
+impl TaskId {
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+}
 
 struct Scheduler {
     current: Option<TaskId>,
@@ -33,11 +42,11 @@ impl Scheduler {
     fn make_switch(&mut self, current_id: TaskId, next_id: TaskId) -> Switch {
         assert_ne!(current_id, next_id);
 
-        let current = self.tasks[current_id].as_mut().unwrap();
+        let current = self.tasks[current_id.0].as_mut().unwrap();
         let prev_ctx = &mut current.context as *mut ThreadContext;
         let prev_as_id = current.as_id;
 
-        let next = self.tasks[next_id].as_ref().unwrap();
+        let next = self.tasks[next_id.0].as_ref().unwrap();
         let next_ctx = &next.context as *const ThreadContext;
         let next_as_id = next.as_id;
         let next_kernel_stack = next.kernel_stack.top();
@@ -55,7 +64,7 @@ impl Scheduler {
 struct Switch {
     previous_context: *mut ThreadContext,
     next_context: *const ThreadContext,
-    next_as_id: usize,
+    next_as_id: AddressSpaceId,
     next_kernel_stack: VirtualAddr,
     activate_address_space: bool,
 }
@@ -85,7 +94,7 @@ struct ReadyQueue {
 impl ReadyQueue {
     pub const fn new() -> Self {
         Self {
-            entries: [0; MAX_TASKS],
+            entries: [TaskId(0); MAX_TASKS],
             head: 0,
             len: 0,
         }
@@ -147,15 +156,20 @@ pub fn add_task(mut task: Tcb) -> Result<TaskId, Tcb> {
 
         match scheduler.tasks.iter().position(Option::is_none) {
             Some(id) => {
+                let id = TaskId(id);
+
                 task.id = id;
 
-                task.handles.push(Handle {
+                match task.handles.push(Handle {
                     object: KernelObject::Thread(id),
                     rights: Rights::READ | Rights::WRITE | Rights::EXECUTE,
-                });
+                }) {
+                    Ok(_) => {}
+                    Err(_) => unreachable!("Cant push root thread handle"),
+                }
 
                 task.state = ThreadState::Ready;
-                scheduler.tasks[id] = Some(task);
+                scheduler.tasks[id.0] = Some(task);
                 assert!(scheduler.ready.push_back(id));
                 Ok(id)
             }
@@ -176,7 +190,7 @@ pub fn start() -> ! {
         let scheduler = unsafe { &mut *SCHEDULER.0.get() };
         let next_id = scheduler.ready.pop_front().expect("no tasks to run");
 
-        let next = scheduler.tasks[next_id]
+        let next = scheduler.tasks[next_id.0]
             .as_mut()
             .expect("ready task is missing");
 
@@ -210,20 +224,20 @@ pub fn allocate_kernel_stack(
     result
 }
 
-pub fn remove_task(id: TaskId) -> Option<Tcb> {
+pub fn remove_task(id: TaskId) -> bool {
     let interrupt_state = crate::arch::disable_interrupts_and_save();
 
     let result = {
         let scheduler = unsafe { &mut *SCHEDULER.0.get() };
 
         if scheduler.current == Some(id) {
-            None
-        } else if let Some(task) = scheduler.tasks.get_mut(id).and_then(Option::take) {
+            false
+        } else if let Some(task) = scheduler.tasks.get_mut(id.0).and_then(Option::take) {
             scheduler.ready.remove(id);
-            scheduler.stacks.free(&task.kernel_stack);
-            Some(task)
+            scheduler.stacks.free(task.kernel_stack);
+            true
         } else {
-            None
+            false
         }
     };
 
@@ -231,14 +245,24 @@ pub fn remove_task(id: TaskId) -> Option<Tcb> {
     result
 }
 
-pub fn get_task(id: TaskId) -> Option<&'static Tcb> {
-    let scheduler = unsafe { &mut *SCHEDULER.0.get() };
-    scheduler.tasks.get(id).and_then(Option::as_ref)
+pub fn with_task<R>(id: TaskId, f: impl FnOnce(&Tcb) -> R) -> Option<R> {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
+    let scheduler = unsafe { &*SCHEDULER.0.get() };
+    let res = scheduler.tasks.get(id.0).and_then(Option::as_ref).map(f);
+    crate::arch::restore_interrupts(interrupt_state);
+    res
 }
 
-pub fn get_task_mut(id: TaskId) -> Option<&'static mut Tcb> {
+pub fn with_task_mut<R>(id: TaskId, f: impl FnOnce(&mut Tcb) -> R) -> Option<R> {
+    let interrupt_state = crate::arch::disable_interrupts_and_save();
     let scheduler = unsafe { &mut *SCHEDULER.0.get() };
-    scheduler.tasks.get_mut(id).and_then(Option::as_mut)
+    let res = scheduler
+        .tasks
+        .get_mut(id.0)
+        .and_then(Option::as_mut)
+        .map(f);
+    crate::arch::restore_interrupts(interrupt_state);
+    res
 }
 
 pub fn current() -> TaskId {
@@ -259,10 +283,10 @@ pub fn block_current(reason: BlockReason) {
 
         let current_id = scheduler.current.expect("no current task");
 
-        scheduler.tasks[current_id].as_mut().unwrap().state = ThreadState::Blocked(reason);
+        scheduler.tasks[current_id.0].as_mut().unwrap().state = ThreadState::Blocked(reason);
         // explicitly do NOT push back the current task, because it is not ready
 
-        scheduler.tasks[next_id].as_mut().unwrap().state = ThreadState::Running;
+        scheduler.tasks[next_id.0].as_mut().unwrap().state = ThreadState::Running;
         scheduler.current = Some(next_id);
 
         scheduler.make_switch(current_id, next_id)
@@ -280,7 +304,7 @@ pub fn unblock(id: TaskId) {
     let interrupt_state = crate::arch::disable_interrupts_and_save();
 
     let scheduler = unsafe { &mut *SCHEDULER.0.get() };
-    if let Some(task) = scheduler.tasks[id].as_mut() {
+    if let Some(task) = scheduler.tasks[id.0].as_mut() {
         if matches!(task.state, ThreadState::Blocked(_)) {
             task.state = ThreadState::Ready;
             assert!(scheduler.ready.push_back(id));
@@ -303,10 +327,10 @@ pub fn yield_current() {
 
         let current_id = scheduler.current.expect("no current task");
 
-        scheduler.tasks[current_id].as_mut().unwrap().state = ThreadState::Ready;
+        scheduler.tasks[current_id.0].as_mut().unwrap().state = ThreadState::Ready;
         assert!(scheduler.ready.push_back(current_id));
 
-        scheduler.tasks[next_id].as_mut().unwrap().state = ThreadState::Running;
+        scheduler.tasks[next_id.0].as_mut().unwrap().state = ThreadState::Running;
         scheduler.current = Some(next_id);
 
         scheduler.make_switch(current_id, next_id)
@@ -331,10 +355,10 @@ pub fn exit_current(exit_code: usize) -> ! {
             crate::hcf();
         };
 
-        let current = scheduler.tasks[current_id].as_mut().unwrap();
+        let current = scheduler.tasks[current_id.0].as_mut().unwrap();
         current.state = ThreadState::Dead(ExitReason::Exited(exit_code));
 
-        scheduler.tasks[next_id].as_mut().unwrap().state = ThreadState::Running;
+        scheduler.tasks[next_id.0].as_mut().unwrap().state = ThreadState::Running;
         scheduler.current = Some(next_id);
 
         scheduler.make_switch(current_id, next_id)

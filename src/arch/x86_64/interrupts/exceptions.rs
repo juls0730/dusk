@@ -1,79 +1,87 @@
 use core::arch::asm;
 
-use super::idt::{self, InterruptStackFrame};
+use super::idt::{self, InterruptFrame, InterruptStackFrame, stub_err, stub_no_err};
 use crate::{hcf, println};
 
-macro_rules! fatal_without_error_code {
-    ($handler:ident, $name:literal) => {
-        extern "x86-interrupt" fn $handler(frame: InterruptStackFrame) {
-            fatal_exception($name, &frame, None);
+stub_no_err!(stub_divide_error, 0);
+stub_no_err!(stub_debug, 1);
+stub_no_err!(stub_non_maskable_interrupt, 2);
+stub_no_err!(stub_breakpoint, 3);
+stub_no_err!(stub_invalid_opcode, 6);
+stub_no_err!(stub_device_not_available, 7);
+stub_err!(stub_double_fault, 8);
+stub_err!(stub_invalid_tss, 10);
+stub_err!(stub_segment_not_present, 11);
+stub_err!(stub_stack_segment_fault, 12);
+stub_err!(stub_general_protection, 13);
+stub_err!(stub_page_fault, 14);
+stub_no_err!(stub_x87_floating_point, 16);
+stub_err!(stub_alignment_check, 17);
+stub_no_err!(stub_machine_check, 18);
+stub_no_err!(stub_simd_floating_point, 19);
+stub_no_err!(stub_user_test_exit, 0x80);
+
+pub(super) fn handle(frame: &mut InterruptFrame) {
+    match frame.vector as u8 {
+        0 => fatal_exception("DIVIDE ERROR", &frame.stack_frame, None),
+        1 => fatal_exception("DEBUG EXCEPTION", &frame.stack_frame, None),
+        2 => fatal_exception("NON-MASKABLE INTERRUPT", &frame.stack_frame, None),
+        3 => report_exception("BREAKPOINT", &frame.stack_frame, None),
+        6 => fatal_exception("INVALID OPCODE", &frame.stack_frame, None),
+        7 => fatal_exception("DEVICE NOT AVAILABLE", &frame.stack_frame, None),
+        8 => fatal_exception("DOUBLE FAULT", &frame.stack_frame, Some(frame.error_code)),
+        10 => fatal_exception("INVALID TSS", &frame.stack_frame, Some(frame.error_code)),
+        11 => fatal_exception("SEGMENT NOT PRESENT", &frame.stack_frame, Some(frame.error_code)),
+        12 => fatal_exception("STACK-SEGMENT FAULT", &frame.stack_frame, Some(frame.error_code)),
+        13 => fatal_exception(
+            "GENERAL PROTECTION FAULT",
+            &frame.stack_frame,
+            Some(frame.error_code),
+        ),
+        14 => {
+            report_exception("PAGE FAULT", &frame.stack_frame, Some(frame.error_code));
+            println!("Faulting address: {:#X}", read_cr2());
+            print_page_fault_error(frame.error_code);
+            hcf();
         }
-    };
-}
+        16 => fatal_exception("X87 FLOATING-POINT EXCEPTION", &frame.stack_frame, None),
+        17 => fatal_exception("ALIGNMENT CHECK", &frame.stack_frame, Some(frame.error_code)),
+        18 => fatal_exception("MACHINE CHECK", &frame.stack_frame, None),
+        19 => fatal_exception("SIMD FLOATING-POINT EXCEPTION", &frame.stack_frame, None),
+        0x80 => {
+            if frame.stack_frame.code_segment & 0b11 != 3 {
+                panic!("user_test_exit_handler called from kernel");
+            }
 
-macro_rules! fatal_with_error_code {
-    ($handler:ident, $name:literal) => {
-        extern "x86-interrupt" fn $handler(frame: InterruptStackFrame, error_code: u64) {
-            fatal_exception($name, &frame, Some(error_code));
+            println!("User test exit");
+            hcf();
         }
-    };
-}
-
-extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
-    report_exception("BREAKPOINT", &frame, None);
-}
-
-extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    report_exception("PAGE FAULT", &frame, Some(error_code));
-    println!("Faulting address: {:#X}", read_cr2());
-    print_page_fault_error(error_code);
-    hcf();
-}
-
-fatal_without_error_code!(divide_error_handler, "DIVIDE ERROR");
-fatal_without_error_code!(debug_handler, "DEBUG EXCEPTION");
-fatal_without_error_code!(non_maskable_interrupt_handler, "NON-MASKABLE INTERRUPT");
-fatal_without_error_code!(invalid_opcode_handler, "INVALID OPCODE");
-fatal_without_error_code!(device_not_available_handler, "DEVICE NOT AVAILABLE");
-fatal_without_error_code!(x87_floating_point_handler, "X87 FLOATING-POINT EXCEPTION");
-fatal_without_error_code!(machine_check_handler, "MACHINE CHECK");
-fatal_without_error_code!(simd_floating_point_handler, "SIMD FLOATING-POINT EXCEPTION");
-
-fatal_with_error_code!(double_fault_handler, "DOUBLE FAULT");
-fatal_with_error_code!(invalid_tss_handler, "INVALID TSS");
-fatal_with_error_code!(segment_not_present_handler, "SEGMENT NOT PRESENT");
-fatal_with_error_code!(stack_segment_fault_handler, "STACK-SEGMENT FAULT");
-fatal_with_error_code!(general_protection_handler, "GENERAL PROTECTION FAULT");
-fatal_with_error_code!(alignment_check_handler, "ALIGNMENT CHECK");
-
-extern "x86-interrupt" fn user_test_exit_handler(frame: InterruptStackFrame) {
-    if frame.code_segment & 0b11 != 3 {
-        panic!("user_test_exit_handler called from kernel");
+        _ => {
+            println!("Unhandled exception vector: {:#X}", frame.vector);
+            hcf();
+        }
     }
-
-    println!("User test exit");
-    hcf();
 }
 
 pub(super) fn install(idt: &mut idt::Idt) {
-    idt.set_handler(0, divide_error_handler, 0);
-    idt.set_handler(1, debug_handler, 0);
-    idt.set_handler(2, non_maskable_interrupt_handler, 0);
-    idt.set_user_handler(3, breakpoint_handler, 0);
-    idt.set_handler(6, invalid_opcode_handler, 0);
-    idt.set_handler(7, device_not_available_handler, 0);
-    idt.set_error_code_handler(8, double_fault_handler, 1);
-    idt.set_error_code_handler(10, invalid_tss_handler, 0);
-    idt.set_error_code_handler(11, segment_not_present_handler, 0);
-    idt.set_error_code_handler(12, stack_segment_fault_handler, 0);
-    idt.set_error_code_handler(13, general_protection_handler, 0);
-    idt.set_error_code_handler(14, page_fault_handler, 0);
-    idt.set_handler(16, x87_floating_point_handler, 0);
-    idt.set_error_code_handler(17, alignment_check_handler, 0);
-    idt.set_handler(18, machine_check_handler, 0);
-    idt.set_handler(19, simd_floating_point_handler, 0);
+    idt.set_handler(0, stub_divide_error, 0);
+    idt.set_handler(1, stub_debug, 0);
+    idt.set_handler(2, stub_non_maskable_interrupt, 0);
+    idt.set_user_handler(3, stub_breakpoint, 0);
+    idt.set_handler(6, stub_invalid_opcode, 0);
+    idt.set_handler(7, stub_device_not_available, 0);
+    idt.set_handler(8, stub_double_fault, 1);
+    idt.set_handler(10, stub_invalid_tss, 0);
+    idt.set_handler(11, stub_segment_not_present, 0);
+    idt.set_handler(12, stub_stack_segment_fault, 0);
+    idt.set_handler(13, stub_general_protection, 0);
+    idt.set_handler(14, stub_page_fault, 0);
+    idt.set_handler(16, stub_x87_floating_point, 0);
+    idt.set_handler(17, stub_alignment_check, 0);
+    idt.set_handler(18, stub_machine_check, 0);
+    idt.set_handler(19, stub_simd_floating_point, 0);
 
-    idt.set_user_handler(0x80, user_test_exit_handler, 0);
+    idt.set_user_handler(0x80, stub_user_test_exit, 0);
 }
 
 fn read_cr2() -> u64 {

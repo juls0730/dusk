@@ -137,7 +137,7 @@ compile-binaries:
 
 ovmf-x86_64:
 	mkdir -p ovmf/ovmf-x86_64
-	@if [ ! -d "ovmf/ovmf-x86_64/OVMF.fd" ]; then \
+	@if [ ! -f "ovmf/ovmf-x86_64/OVMF.fd" ]; then \
 		cd ovmf/ovmf-x86_64 && curl -Lo OVMF.fd https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd; \
 	fi
 

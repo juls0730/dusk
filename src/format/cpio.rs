@@ -38,6 +38,10 @@ pub fn find_file<'a>(archive: &'a [u8], target: &str) -> Option<&'a [u8]> {
     let mut offset = 0;
 
     while offset + core::mem::size_of::<Header>() <= archive.len() {
+        if offset + core::mem::size_of::<Header>() > archive.len() {
+            return None;
+        }
+
         let header = Header::from_bytes(&archive[offset..])?;
         let header_start = offset;
         offset += core::mem::size_of::<Header>();

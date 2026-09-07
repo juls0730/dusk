@@ -7,9 +7,9 @@ use core::ops::Add;
 
 #[allow(unused)]
 pub use address_space::{
-    AddressSpace, AddressSpaceCreateError, MapError, UnmapError, init_kernel_address_space,
-    insert_address_space, remove_address_space, with_address_space, with_address_space_mut,
-    with_kernel_address_space,
+    AddressSpace, AddressSpaceCreateError, AddressSpaceId, MapError, PageTableMapping, UnmapError,
+    init_kernel_address_space, insert_address_space, remove_address_space, with_address_space,
+    with_address_space_mut, with_kernel_address_space,
 };
 pub use frame::{
     FRAME_SIZE, FrameAddr, FrameAllocator, OwnedFrame, alloc_frame, dealloc_frame,

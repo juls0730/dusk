@@ -8,6 +8,10 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct AddressSpaceId(usize);
+
 const MAX_ADDRESS_SPACES: usize = 32;
 struct AddressSpaceTable {
     entries: [Option<AddressSpace>; MAX_ADDRESS_SPACES],
@@ -20,27 +24,27 @@ impl AddressSpaceTable {
         }
     }
 
-    fn insert(&mut self, address_space: AddressSpace) -> Option<usize> {
+    fn insert(&mut self, address_space: AddressSpace) -> Result<AddressSpaceId, AddressSpace> {
         for (i, slot) in self.entries.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(address_space);
-                return Some(i);
+                return Ok(AddressSpaceId(i));
             }
         }
 
-        None
+        Err(address_space)
     }
 
-    fn get(&self, id: usize) -> Option<&AddressSpace> {
-        self.entries.get(id).and_then(Option::as_ref)
+    fn get(&self, id: AddressSpaceId) -> Option<&AddressSpace> {
+        self.entries.get(id.0).and_then(Option::as_ref)
     }
 
-    fn get_mut(&mut self, id: usize) -> Option<&mut AddressSpace> {
-        self.entries.get_mut(id).and_then(Option::as_mut)
+    fn get_mut(&mut self, id: AddressSpaceId) -> Option<&mut AddressSpace> {
+        self.entries.get_mut(id.0).and_then(Option::as_mut)
     }
 
-    fn remove(&mut self, id: usize) -> Option<AddressSpace> {
-        self.entries.get_mut(id).and_then(Option::take)
+    fn remove(&mut self, id: AddressSpaceId) -> Option<AddressSpace> {
+        self.entries.get_mut(id.0).and_then(Option::take)
     }
 }
 
@@ -51,20 +55,19 @@ unsafe impl Sync for GlobalAddressSpaceTable {}
 static ADDRESS_SPACE_TABLE: GlobalAddressSpaceTable =
     GlobalAddressSpaceTable(UnsafeCell::new(AddressSpaceTable::new()));
 
-pub fn insert_address_space(address_space: AddressSpace) -> Option<usize> {
+pub fn insert_address_space(address_space: AddressSpace) -> Result<AddressSpaceId, AddressSpace> {
     let table = unsafe { &mut *ADDRESS_SPACE_TABLE.0.get() };
 
-    let id = table.insert(address_space);
-    id
+    table.insert(address_space)
 }
 
-pub fn remove_address_space(id: usize) -> Option<AddressSpace> {
+pub fn remove_address_space(id: AddressSpaceId) -> Option<AddressSpace> {
     let table = unsafe { &mut *ADDRESS_SPACE_TABLE.0.get() };
 
     table.remove(id)
 }
 
-pub fn with_address_space<R>(id: usize, f: impl FnOnce(&AddressSpace) -> R) -> Option<R> {
+pub fn with_address_space<R>(id: AddressSpaceId, f: impl FnOnce(&AddressSpace) -> R) -> Option<R> {
     let interrupt_state = crate::arch::disable_interrupts_and_save();
     let table = unsafe { &*ADDRESS_SPACE_TABLE.0.get() };
     let res = table.get(id).map(f);
@@ -72,7 +75,10 @@ pub fn with_address_space<R>(id: usize, f: impl FnOnce(&AddressSpace) -> R) -> O
     res
 }
 
-pub fn with_address_space_mut<R>(id: usize, f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
+pub fn with_address_space_mut<R>(
+    id: AddressSpaceId,
+    f: impl FnOnce(&mut AddressSpace) -> R,
+) -> Option<R> {
     let interrupt_state = crate::arch::disable_interrupts_and_save();
     let table = unsafe { &mut *ADDRESS_SPACE_TABLE.0.get() };
     let res = table.get_mut(id).map(f);
@@ -181,6 +187,10 @@ impl From<PageTableCreateError> for AddressSpaceCreateError {
             PageTableCreateError::OutOfFrames => Self::OutOfMemory,
         }
     }
+}
+
+pub struct PageTableMapping {
+    pub permissions: PagePermissions,
 }
 
 #[derive(PartialEq, Eq)]
@@ -425,6 +435,10 @@ impl AddressSpace {
 
     pub fn to_virtual(&self, physical_addr: PhysicalAddr) -> Option<VirtualAddr> {
         self.root.to_virtual(physical_addr)
+    }
+
+    pub fn mapping(&self, virtual_addr: VirtualAddr) -> Option<PageTableMapping> {
+        self.root.mapping(virtual_addr)
     }
 
     pub unsafe fn activate(&self) {

@@ -1,4 +1,3 @@
-#![feature(abi_x86_interrupt)]
 #![allow(clippy::needless_return)]
 #![no_std]
 #![no_main]

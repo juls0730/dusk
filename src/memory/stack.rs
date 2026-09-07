@@ -237,8 +237,13 @@ impl KernelStackPool {
         Err(StackCreateError::OutOfStacks)
     }
 
-    pub fn free(&mut self, stack: &KernelStack) {
+    pub fn free(&mut self, stack: KernelStack) {
         let slot = (stack.top().as_usize() - KERNEL_STACK_BASE) / KERNEL_SLOT_SIZE - 1;
+        crate::memory::with_kernel_address_space(|kernel_as| {
+            crate::memory::with_allocator(|allocator| unsafe {
+                stack.destroy(kernel_as, allocator)
+            });
+        });
         self.free_slots &= !(1 << slot);
     }
 }
